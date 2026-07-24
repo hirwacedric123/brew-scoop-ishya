@@ -23,6 +23,7 @@ def init_users_table(db):
             role TEXT NOT NULL CHECK(role IN ('admin', 'supervisor', 'stock_manager', 'seller')),
             is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
             must_change_password INTEGER NOT NULL DEFAULT 0 CHECK(must_change_password IN (0, 1)),
+            pin TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -34,16 +35,19 @@ def init_users_table(db):
 
 
 def row_to_user(row):
+    keys = row.keys()
+    pin_value = (row["pin"] or "").strip() if "pin" in keys else ""
     return {
         "id": row["id"],
         "username": row["username"],
         "display_name": row["display_name"],
-        "email": (row["email"] or "").strip() if "email" in row.keys() else "",
+        "email": (row["email"] or "").strip() if "email" in keys else "",
         "role": row["role"],
         "is_active": bool(row["is_active"]),
         "must_change_password": bool(row["must_change_password"])
-        if "must_change_password" in row.keys()
+        if "must_change_password" in keys
         else False,
+        "has_pin": bool(pin_value),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -65,6 +69,42 @@ def get_user_by_username(db, username):
         "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
         (username.strip(),),
     ).fetchone()
+
+
+def get_user_by_pin(db, pin):
+    pin = (pin or "").strip()
+    if not pin:
+        return None
+    return db.execute(
+        "SELECT * FROM users WHERE pin = ? AND is_active = 1",
+        (pin,),
+    ).fetchone()
+
+
+PIN_MIN_LEN = 4
+PIN_MAX_LEN = 6
+
+
+def normalize_pin(value):
+    return re.sub(r"\D", "", str(value or ""))
+
+
+def validate_pin(value, *, required=True):
+    pin = normalize_pin(value)
+    if not pin:
+        return ("PIN is required" if required else None), None
+    if len(pin) < PIN_MIN_LEN or len(pin) > PIN_MAX_LEN:
+        return f"PIN must be {PIN_MIN_LEN}–{PIN_MAX_LEN} digits", None
+    return None, pin
+
+
+def pin_taken(db, pin, exclude_user_id=None):
+    query = "SELECT id FROM users WHERE pin = ?"
+    params = [pin]
+    if exclude_user_id is not None:
+        query += " AND id != ?"
+        params.append(exclude_user_id)
+    return db.execute(query, params).fetchone() is not None
 
 
 def get_current_user(db):
