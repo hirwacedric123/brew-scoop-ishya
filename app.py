@@ -19,6 +19,7 @@ from auth import (
     admin_required,
     get_current_user,
     get_user_by_id,
+    get_user_by_pin,
     get_user_by_username,
     hash_password,
     init_users_table,
@@ -26,10 +27,13 @@ from auth import (
     login_user,
     logout_user,
     normalize_email,
+    normalize_pin,
+    pin_taken,
     public_user,
     role_required,
     row_to_user,
     validate_email,
+    validate_pin,
     validate_user_payload,
     verify_password,
     verify_admin_password,
@@ -264,6 +268,15 @@ def _migrate_db(db):
         )
 
     _migrate_users_supervisor_role(db)
+
+    # PIN column after role migrations so table rebuilds don't drop it.
+    user_cols = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+    if "pin" not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN pin TEXT")
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_pin ON users(pin) "
+        "WHERE pin IS NOT NULL AND pin != ''"
+    )
 
     init_password_reset_table(db)
 
@@ -759,16 +772,26 @@ def _session_duration_seconds(row):
 @app.route("/api/auth/login", methods=["POST"])
 def auth_login():
     data = request.get_json(silent=True) or {}
+    pin = normalize_pin(data.get("pin"))
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
 
-    if not username or not password:
-        return jsonify({"error": "Username and password are required"}), 400
-
     db = get_db()
-    row = get_user_by_username(db, username)
-    if not row or not row["is_active"] or not verify_password(row["password_hash"], password):
-        return jsonify({"error": "Invalid username or password"}), 401
+    row = None
+
+    if pin:
+        error, pin = validate_pin(pin)
+        if error:
+            return jsonify({"error": error}), 400
+        row = get_user_by_pin(db, pin)
+        if not row:
+            return jsonify({"error": "Invalid PIN"}), 401
+    elif username and password:
+        row = get_user_by_username(db, username)
+        if not row or not row["is_active"] or not verify_password(row["password_hash"], password):
+            return jsonify({"error": "Invalid username or password"}), 401
+    else:
+        return jsonify({"error": "Enter your PIN to sign in"}), 400
 
     login_user(row["id"])
     _start_seller_session(db, row["id"])
@@ -939,6 +962,45 @@ def auth_update_profile():
     return jsonify({"message": "Profile updated", "user": public_user(updated)})
 
 
+@app.route("/api/auth/pin", methods=["POST"])
+@login_required
+def auth_set_pin():
+    data = request.get_json(silent=True) or {}
+    error, pin = validate_pin(data.get("pin"))
+    if error:
+        return jsonify({"error": error}), 400
+
+    confirm = normalize_pin(data.get("confirm_pin"))
+    if confirm and confirm != pin:
+        return jsonify({"error": "PINs do not match"}), 400
+
+    db = get_db()
+    user = get_current_user(db)
+    current_pin = (user["pin"] or "").strip() if "pin" in user.keys() else ""
+
+    if current_pin:
+        provided = normalize_pin(data.get("current_pin"))
+        if not provided or provided != current_pin:
+            return jsonify({"error": "Current PIN is incorrect"}), 400
+        if provided == pin:
+            return jsonify({"error": "New PIN must be different from the current one"}), 400
+    else:
+        current_password = data.get("current_password") or ""
+        if not current_password or not verify_password(user["password_hash"], current_password):
+            return jsonify({"error": "Current password is required to set your first PIN"}), 400
+
+    if pin_taken(db, pin, exclude_user_id=user["id"]):
+        return jsonify({"error": "That PIN is already used by another account"}), 409
+
+    db.execute(
+        "UPDATE users SET pin=?, updated_at=? WHERE id=?",
+        (pin, now_iso(), user["id"]),
+    )
+    db.commit()
+    updated = get_user_by_id(db, user["id"])
+    return jsonify({"message": "PIN saved", "user": public_user(updated)})
+
+
 # ── Admin API ──────────────────────────────────────────────────────────────
 
 @app.route("/api/admin/users", methods=["GET"])
@@ -1034,18 +1096,27 @@ def admin_create_user():
         return jsonify({"error": email_error}), 400
     email = normalize_email(data.get("email"))
 
+    pin = None
+    if data.get("pin") not in (None, ""):
+        pin_error, pin = validate_pin(data.get("pin"))
+        if pin_error:
+            return jsonify({"error": pin_error}), 400
+        if pin_taken(db, pin):
+            return jsonify({"error": "That PIN is already used by another account"}), 409
+
     ts = now_iso()
     cur = db.execute(
         """INSERT INTO users
            (username, password_hash, display_name, email, role, is_active,
-            must_change_password, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?)""",
+            must_change_password, pin, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?, ?)""",
         (
             data["username"].strip(),
             hash_password(data["password"]),
             (data.get("display_name") or data["username"]).strip(),
             email,
             data.get("role", "stock_manager"),
+            pin,
             ts,
             ts,
         ),
@@ -1103,12 +1174,24 @@ def admin_update_user(user_id):
             return jsonify({"error": "Password must be at least 6 characters"}), 400
         password_hash = hash_password(data["password"])
 
+    pin = row["pin"] if "pin" in row.keys() else None
+    if "pin" in data:
+        raw_pin = data.get("pin")
+        if raw_pin in (None, ""):
+            pin = None
+        else:
+            pin_error, pin = validate_pin(raw_pin)
+            if pin_error:
+                return jsonify({"error": pin_error}), 400
+            if pin_taken(db, pin, exclude_user_id=user_id):
+                return jsonify({"error": "That PIN is already used by another account"}), 409
+
     ts = now_iso()
     db.execute(
         """UPDATE users SET
-           display_name=?, email=?, role=?, is_active=?, password_hash=?, updated_at=?
+           display_name=?, email=?, role=?, is_active=?, password_hash=?, pin=?, updated_at=?
            WHERE id=?""",
-        (display_name, email, role, is_active, password_hash, ts, user_id),
+        (display_name, email, role, is_active, password_hash, pin, ts, user_id),
     )
     db.commit()
     updated = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
