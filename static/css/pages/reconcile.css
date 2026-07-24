@@ -998,7 +998,7 @@
 
 .shift-payment-row {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto minmax(0, 1fr) max-content;
   grid-template-rows: auto auto;
   align-items: center;
   gap: 0.35rem 0.75rem;
@@ -1030,15 +1030,17 @@
   font-size: 0.88rem;
   font-weight: 500;
   color: var(--text);
+  min-width: 0;
 }
 
 .shift-payment-bar-wrap {
-  grid-column: 2 / -1;
+  grid-column: 2;
   grid-row: 2;
   height: 5px;
   border-radius: 999px;
   background: var(--foam);
   overflow: hidden;
+  min-width: 0;
 }
 
 .shift-payment-bar {
@@ -1053,11 +1055,13 @@
 
 .shift-payment-row strong {
   grid-column: 3;
-  grid-row: 1;
+  grid-row: 1 / 3;
+  align-self: center;
   font-family: var(--font-display);
   font-size: 1rem;
   color: var(--espresso);
   white-space: nowrap;
+  justify-self: end;
 }
 
 .reconcile-closed-note {
@@ -1175,6 +1179,7 @@
   border-radius: var(--radius-sm);
   background: var(--surface-muted, #faf8f5);
   overflow: hidden;
+  flex-shrink: 0;
 }
 
 .shift-sale-card-head {
