@@ -1335,6 +1335,62 @@
               <div class="card-header">
                 <div class="card-title-group">
                   <span class="card-title-icon card-title-icon-coffee">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><circle cx="12" cy="16" r="1"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                  </span>
+                  <div>
+                    <h3>Login PIN</h3>
+                    <p class="profile-card-desc" id="profile-pin-desc">Set a 4–6 digit PIN for quick sign-in</p>
+                  </div>
+                </div>
+              </div>
+              <div class="card-body">
+                <div class="profile-security-tip">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                  <p id="profile-pin-tip">Your PIN must be unique. Use it on the login keypad instead of a username.</p>
+                </div>
+                <form id="profile-pin-form" class="profile-form">
+                  <div class="form-group" id="profile-current-password-group">
+                    <label for="profile-pin-password">Current password</label>
+                    <div class="profile-input-wrap">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                      <input type="password" id="profile-pin-password" autocomplete="current-password" placeholder="Confirm with your password">
+                    </div>
+                  </div>
+                  <div class="form-group" id="profile-current-pin-group" hidden>
+                    <label for="profile-current-pin">Current PIN</label>
+                    <div class="profile-input-wrap">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2"/><circle cx="12" cy="16" r="1"/></svg>
+                      <input type="password" id="profile-current-pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off" placeholder="Current PIN">
+                    </div>
+                  </div>
+                  <div class="form-group">
+                    <label for="profile-new-pin">New PIN</label>
+                    <div class="profile-input-wrap">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                      <input type="password" id="profile-new-pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" required placeholder="4–6 digits">
+                    </div>
+                  </div>
+                  <div class="form-group">
+                    <label for="profile-confirm-pin">Confirm PIN</label>
+                    <div class="profile-input-wrap">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                      <input type="password" id="profile-confirm-pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" required placeholder="Repeat PIN">
+                    </div>
+                  </div>
+                  <div class="profile-form-actions">
+                    <button type="submit" class="btn btn-primary" id="btn-save-pin">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                      Save PIN
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+
+            <div class="card profile-card profile-card-security">
+              <div class="card-header">
+                <div class="card-title-group">
+                  <span class="card-title-icon card-title-icon-coffee">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                   </span>
                   <div>
@@ -1442,6 +1498,11 @@
           <label for="user-password">Temporary password *</label>
           <input type="password" id="user-password" minlength="6" placeholder="At least 6 characters">
           <p class="form-hint">The user must change this password on first sign-in</p>
+        </div>
+        <div class="form-group">
+          <label for="user-pin">Login PIN</label>
+          <input type="text" id="user-pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="4–6 digits (optional)">
+          <p class="form-hint">Unique PIN for keypad sign-in. Leave blank to keep unchanged when editing.</p>
         </div>
         <div class="form-group">
           <label for="user-role">Role</label>
