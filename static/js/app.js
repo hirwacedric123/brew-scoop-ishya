@@ -3143,17 +3143,21 @@ function buildShiftListItemHtml(shift, selectedId, maxSales, selectFn) {
     shift.status === "open"
       ? `Started ${formatTime(shift.opened_at)} · ${formatShiftDuration(shift.opened_at, true)}`
       : `${formatTime(shift.opened_at)} → ${formatTime(shift.closed_at)}`;
-  const sellerLine = isSeller() ? "" : `${esc(shift.seller_name)} `;
+  const sellerName = isSeller() ? "Your shift" : esc(shift.seller_name);
   const concernBadge = shiftHasReport(shift)
     ? '<span class="shift-concern-badge" title="Seller left an end-of-shift report">!</span>'
     : "";
+  const salesMeta = `${fmtNum.format(shift.sale_count)} sale${shift.sale_count !== 1 ? "s" : ""} · ${fmtNum.format(shift.units_sold)} units`;
   return `
     <button type="button" class="sales-date-item shift-list-item ${selectedId === shift.id ? "active" : ""}"
       onclick="${selectFn}(${shift.id})">
       <div class="sales-date-info">
-        <strong>${sellerLine}${statusBadge}${concernBadge}</strong>
-        <span>${timeLine}</span>
-        <span>${fmtNum.format(shift.sale_count)} sale${shift.sale_count !== 1 ? "s" : ""} · ${fmtNum.format(shift.units_sold)} units</span>
+        <div class="shift-list-head">
+          <strong>${sellerName}</strong>
+          ${statusBadge}${concernBadge}
+        </div>
+        <span class="shift-list-meta">${timeLine}</span>
+        <span class="shift-list-meta">${salesMeta}</span>
       </div>
       <div class="sales-date-revenue">${fmt.format(shift.total_sales)}</div>
       <div class="sales-date-bar" style="width:${(shift.total_sales / maxSales) * 100}%"></div>
