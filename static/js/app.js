@@ -4135,6 +4135,7 @@ function openAddUser() {
   document.getElementById("user-username").disabled = false;
   document.getElementById("user-password").required = true;
   document.getElementById("user-password-group").hidden = false;
+  document.getElementById("user-pin").value = "";
   document.getElementById("user-active-group").hidden = true;
   document.getElementById("user-role").value = "seller";
   showModal("user-modal");
@@ -4153,6 +4154,7 @@ function openEditUser(id) {
   document.getElementById("user-password").value = "";
   document.getElementById("user-password").required = false;
   document.getElementById("user-password-group").hidden = false;
+  document.getElementById("user-pin").value = "";
   document.getElementById("user-active-group").hidden = false;
   document.getElementById("user-role").value = user.role;
   document.getElementById("user-active").checked = user.is_active;
@@ -4176,6 +4178,8 @@ async function saveUser(e) {
 
   const password = document.getElementById("user-password").value;
   if (password) payload.password = password;
+  const pin = document.getElementById("user-pin")?.value.trim() || "";
+  if (pin) payload.pin = pin;
 
   try {
     if (id) {
@@ -4396,6 +4400,68 @@ function loadProfileView() {
 
   syncProfileHero(user);
   document.getElementById("profile-password-form")?.reset();
+  document.getElementById("profile-pin-form")?.reset();
+  syncProfilePinForm(user);
+}
+
+function syncProfilePinForm(user) {
+  const hasPin = !!user?.has_pin;
+  const passwordGroup = document.getElementById("profile-current-password-group");
+  const pinGroup = document.getElementById("profile-current-pin-group");
+  const desc = document.getElementById("profile-pin-desc");
+  const tip = document.getElementById("profile-pin-tip");
+  const passwordInput = document.getElementById("profile-pin-password");
+  const currentPinInput = document.getElementById("profile-current-pin");
+
+  if (passwordGroup) passwordGroup.hidden = hasPin;
+  if (pinGroup) pinGroup.hidden = !hasPin;
+  if (passwordInput) passwordInput.required = !hasPin;
+  if (currentPinInput) currentPinInput.required = hasPin;
+  if (desc) {
+    desc.textContent = hasPin
+      ? "Change your keypad PIN"
+      : "Set a 4–6 digit PIN for quick sign-in";
+  }
+  if (tip) {
+    tip.textContent = hasPin
+      ? "Enter your current PIN, then choose a new unique PIN."
+      : "Confirm with your password, then choose a unique 4–6 digit PIN.";
+  }
+}
+
+async function savePinFromProfile(e) {
+  e.preventDefault();
+  const pin = document.getElementById("profile-new-pin")?.value.trim() || "";
+  const confirm = document.getElementById("profile-confirm-pin")?.value.trim() || "";
+  if (pin !== confirm) {
+    toast("PINs do not match", "error");
+    return;
+  }
+
+  const hasPin = !!state.currentUser?.has_pin;
+  const payload = { pin, confirm_pin: confirm };
+  if (hasPin) {
+    payload.current_pin = document.getElementById("profile-current-pin")?.value.trim() || "";
+  } else {
+    payload.current_password = document.getElementById("profile-pin-password")?.value || "";
+  }
+
+  const btn = document.getElementById("btn-save-pin");
+  if (btn) btn.disabled = true;
+  try {
+    const data = await api("/api/auth/pin", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.currentUser = { ...state.currentUser, ...data.user };
+    document.getElementById("profile-pin-form")?.reset();
+    syncProfilePinForm(state.currentUser);
+    toast(data.message || "PIN saved");
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function updateUserPanel() {
@@ -4710,6 +4776,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btn-open-profile")?.addEventListener("click", () => switchView("profile"));
   document.getElementById("profile-form")?.addEventListener("submit", saveProfile);
   document.getElementById("profile-password-form")?.addEventListener("submit", changePasswordFromProfile);
+  document.getElementById("profile-pin-form")?.addEventListener("submit", savePinFromProfile);
   document.getElementById("profile-display-name")?.addEventListener("input", previewProfileName);
   document.getElementById("btn-add-user")?.addEventListener("click", openAddUser);
   document.getElementById("user-form")?.addEventListener("submit", saveUser);
