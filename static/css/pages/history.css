@@ -75,8 +75,9 @@ body.seller-reports-mode #view-history .data-table thead th:nth-child(7) {
 
 .history-shifts-list-card .card-body {
   padding: 0.65rem 0.85rem;
-  max-height: 420px;
+  max-height: min(560px, 65vh);
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .history-shift-detail-card .card-body {
