@@ -14,6 +14,9 @@
   grid-template-columns: 1.1fr 0.9fr;
   width: 100%;
   min-height: 100vh;
+  min-height: 100dvh;
+  height: 100vh;
+  height: 100dvh;
 }
 
 .login-hero {
@@ -88,6 +91,8 @@
   align-items: center;
   justify-content: center;
   padding: 2.5rem;
+  overflow-y: auto;
+  min-height: 0;
   background:
     radial-gradient(ellipse at 85% 15%, rgba(196, 165, 116, 0.1) 0%, transparent 50%),
     radial-gradient(ellipse at 10% 90%, rgba(93, 64, 55, 0.05) 0%, transparent 50%),
@@ -154,10 +159,312 @@
   text-decoration: underline;
 }
 
+/* ── PIN keypad ──────────────────────────────────────────────────────────── */
+
+.login-card-pin {
+  padding: 0;
+  overflow: hidden;
+}
+
+.login-card-pin > .login-form-footer,
+.login-card-pin > .login-alt-method,
+.login-card-pin > h2,
+.login-card-pin > .login-subtitle,
+.login-card-pin > .login-signed-in-notice {
+  padding-left: 1.75rem;
+  padding-right: 1.75rem;
+}
+
+.login-card-pin > h2 {
+  padding-top: 2rem;
+}
+
+.login-card-pin > .login-form-footer:last-child,
+.login-card-pin > .login-alt-method {
+  padding-bottom: 1.5rem;
+}
+
+.login-alt-method {
+  margin-top: 0;
+  padding-top: 0.85rem;
+  background: white;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.btn-login-alt {
+  width: 100%;
+  background: linear-gradient(180deg, #5d4037 0%, #3d2618 100%);
+  color: var(--cream);
+  border: none;
+  box-shadow: 0 2px 8px rgba(44, 24, 16, 0.22);
+  font-size: 0.95rem;
+  font-weight: 700;
+  padding: 0.85rem 1.25rem;
+  letter-spacing: 0.01em;
+}
+
+.btn-login-alt:hover {
+  background: linear-gradient(180deg, #6b4b40 0%, #4a3222 100%);
+  color: var(--cream);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(44, 24, 16, 0.28);
+}
+
+.btn-login-alt:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 4px rgba(44, 24, 16, 0.2);
+}
+
+.pin-pad {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.pin-pad-header {
+  padding: 0.85rem 1.25rem;
+  background: linear-gradient(180deg, #5a4036 0%, var(--espresso) 100%);
+  color: var(--cream);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.2);
+}
+
+.pin-display-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.55rem;
+  padding: 1rem 1rem 0.85rem;
+  background: linear-gradient(180deg, #f7f1ea 0%, #efe6dc 100%);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.pin-display {
+  flex: 1;
+  min-height: 3.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  padding: 0.65rem 1rem;
+  background: white;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  box-shadow: inset 0 1px 2px rgba(44, 24, 16, 0.06);
+}
+
+.pin-placeholder {
+  color: var(--text-muted);
+  letter-spacing: 0.35em;
+  font-size: 1.35rem;
+  font-weight: 600;
+  opacity: 0.55;
+}
+
+.pin-dot {
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 50%;
+  background: var(--espresso);
+  box-shadow: 0 1px 2px rgba(44, 24, 16, 0.25);
+}
+
+.pin-backspace {
+  width: 3.25rem;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  background: white;
+  color: var(--coffee);
+  cursor: pointer;
+  transition: background var(--transition), transform var(--transition);
+}
+
+.pin-backspace svg {
+  width: 22px;
+  height: 22px;
+}
+
+.pin-backspace:hover {
+  background: var(--foam);
+}
+
+.pin-backspace:active {
+  transform: scale(0.96);
+}
+
+.pin-keys {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+  padding: 0.75rem 1rem 0.9rem;
+  background: linear-gradient(180deg, #f3ebe3 0%, #e8ddd2 100%);
+}
+
+.pin-key {
+  appearance: none;
+  border: 1px solid rgba(93, 64, 55, 0.18);
+  border-radius: 10px;
+  min-height: 3.7rem;
+  padding: 0.5rem 0.35rem;
+  background: linear-gradient(180deg, #fffefb 0%, #f0e7de 100%);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.85) inset,
+    0 2px 6px rgba(44, 24, 16, 0.08);
+  color: var(--espresso);
+  font-family: var(--font-display);
+  font-size: 1.65rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.08s ease, filter 0.12s ease, box-shadow 0.12s ease;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.15rem;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.pin-key:hover {
+  filter: brightness(1.03);
+}
+
+.pin-key:active {
+  transform: translateY(1px) scale(0.98);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.6) inset,
+    0 1px 2px rgba(44, 24, 16, 0.12);
+}
+
+.pin-key-cancel,
+.pin-key-enter {
+  font-size: 0.78rem;
+  font-family: var(--font-body);
+  font-weight: 600;
+}
+
+.pin-key-icon {
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1;
+  color: white;
+}
+
+.pin-key-icon-cancel {
+  background: linear-gradient(180deg, #e07070 0%, #c44b4b 100%);
+  box-shadow: 0 2px 6px rgba(196, 75, 75, 0.35);
+}
+
+.pin-key-icon-enter {
+  background: linear-gradient(180deg, #6faf7c 0%, #4f8f5f 100%);
+  box-shadow: 0 2px 6px rgba(79, 143, 95, 0.35);
+}
+
+.pin-key-caption {
+  color: var(--espresso);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.pin-key-enter:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.login-form-password {
+  padding: 0;
+}
+
+.login-form-header {
+  padding: 0.85rem 1.25rem;
+  background: linear-gradient(180deg, #5a4036 0%, var(--espresso) 100%);
+  color: var(--cream);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.2);
+}
+
+.login-form-body {
+  padding: 1.75rem 1.75rem 1.5rem;
+  background: linear-gradient(180deg, #faf6f1 0%, white 40%);
+}
+
+.login-form-password .login-subtitle {
+  margin-bottom: 1.5rem;
+  font-size: 1rem;
+  color: var(--text-muted);
+}
+
+.login-form-password .form-group {
+  margin-bottom: 1.35rem;
+}
+
+.login-form-password .form-group label {
+  font-size: 0.8rem;
+  margin-bottom: 0.5rem;
+  color: var(--espresso);
+}
+
+.login-form-password .form-group input {
+  padding: 1rem 1.1rem;
+  font-size: 1.05rem;
+  min-height: 3.25rem;
+  border-width: 1.5px;
+  border-color: var(--border);
+  background: white;
+}
+
+.login-form-password .input-with-icon svg {
+  width: 20px;
+  height: 20px;
+  left: 1.05rem;
+}
+
+.login-form-password .input-with-icon input {
+  padding-left: 3rem !important;
+}
+
+.login-form-password #btn-login {
+  margin-top: 0.35rem;
+  min-height: 3.35rem;
+  font-size: 1.05rem;
+  padding: 0.95rem 1.5rem;
+}
+
+.login-form-password .login-form-footer {
+  margin-top: 1.75rem;
+  padding-top: 1.15rem;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.login-form-password .login-form-footer a {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.login-form-password .login-form-footer a:hover {
+  color: var(--coffee);
+}
+
 @media (max-width: 900px) {
   .login-layout {
     grid-template-columns: 1fr;
     min-height: 100dvh;
+    height: auto;
   }
 
   .login-hero {
@@ -185,6 +492,10 @@
   .login-card {
     padding: 2rem 1.75rem;
   }
+
+  .login-card-pin {
+    padding: 0;
+  }
 }
 
 @media (max-width: 480px) {
@@ -207,7 +518,16 @@
     padding: 1.5rem 1.25rem;
   }
 
+  .login-card-pin {
+    padding: 0;
+  }
+
   .login-card h2 {
+    font-size: 1.45rem;
+  }
+
+  .pin-key {
+    min-height: 3.6rem;
     font-size: 1.45rem;
   }
 }
