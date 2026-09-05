@@ -317,8 +317,8 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           </div>
           <div class="shift-banner-pos-body">
-            <strong>Shift not started</strong>
-            <p>Start your shift before you can sell.</p>
+            <strong id="sell-shift-banner-title">Shift not started</strong>
+            <p id="sell-shift-banner-text">Start or join a shift before you can sell.</p>
           </div>
           <button type="button" class="btn btn-primary btn-sm" id="btn-sell-start-shift">Start Shift</button>
         </div>
@@ -431,7 +431,7 @@
             <div>
               <p class="page-eyebrow page-eyebrow-caramel">Your shift</p>
               <h2>My Shift</h2>
-              <p id="reconcile-subtitle" class="shift-subtitle">Sell during your shift, then reconcile cash, MoMo, and Visa to close</p>
+              <p id="reconcile-subtitle" class="shift-subtitle">Sell during your shift. The first person in closes and reconciles for everyone.</p>
             </div>
           </div>
           <div class="shift-topbar-end">
@@ -492,11 +492,17 @@
           </div>
 
           <div class="shift-sell-hint card" id="shift-sell-hint" hidden>
-            <p>Record sales on the Sell screen. Totals stay hidden until you close your shift.</p>
+            <div class="shift-sell-hint-body">
+              <p id="shift-sell-hint-text">Record sales on the Sell screen. Totals stay hidden until the shift supervisor closes.</p>
+              <div class="shift-team-list" id="shift-team-list" hidden></div>
+            </div>
             <button type="button" class="btn btn-primary shift-link-cta shift-link-cta-primary" id="btn-show-close">
               Done selling? Close shift
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
             </button>
+            <p class="shift-member-wait" id="shift-member-wait" hidden>
+              Waiting for the shift supervisor to close &amp; reconcile.
+            </p>
           </div>
 
           <div class="shift-panels" id="shift-panels">
@@ -506,14 +512,15 @@
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
                 </div>
                 <div>
-                  <h3>Start shift</h3>
-                  <p>Tap start when you are ready to sell. Your totals stay hidden until you close the shift.</p>
+                  <h3 id="shift-start-title">Start shift</h3>
+                  <p id="shift-start-desc">Tap start when you are ready to sell. If a shift is already open, you will join it — the first person in is the supervisor.</p>
                 </div>
               </div>
+              <div class="shift-joinable" id="shift-joinable" hidden></div>
               <form id="shift-start-form" class="shift-form shift-form-start">
                 <button type="submit" class="btn btn-primary btn-lg btn-block shift-cta shift-cta-start" id="btn-start-shift">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                  Start shift
+                  <span id="btn-start-shift-label">Start shift</span>
                 </button>
               </form>
             </div>
@@ -1663,7 +1670,7 @@
         <button class="modal-close" type="button" data-close-modal>&times;</button>
       </div>
       <div style="padding: 0 1.5rem 1.5rem;">
-        <p>You still have an open shift. Close it so cash, MoMo, and Visa can be reconciled — or log out anyway if you will come back.</p>
+        <p id="logout-shift-message">You still have an open shift. Close it so cash, MoMo, and Visa can be reconciled — or log out anyway if you will come back.</p>
         <div class="modal-actions modal-actions-stack">
           <button type="button" class="btn btn-primary" id="logout-go-close-shift">Close shift</button>
           <button type="button" class="btn btn-ghost" id="logout-anyway">Log out anyway</button>

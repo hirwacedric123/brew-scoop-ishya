@@ -235,12 +235,106 @@
   animation: shift-panel-in 0.35s ease;
 }
 
+.shift-sell-hint-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+  flex: 1;
+}
+
 .shift-sell-hint p {
   margin: 0;
   font-size: 0.88rem;
   color: var(--text-muted);
   line-height: 1.5;
   max-width: 28rem;
+}
+
+.shift-member-wait {
+  margin: 0;
+  flex-shrink: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--coffee);
+  max-width: 14rem;
+  text-align: right;
+  line-height: 1.4;
+}
+
+.shift-team-list {
+  margin-top: 0.15rem;
+}
+
+.shift-team-head {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 0.35rem;
+}
+
+.shift-team-people {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.shift-team-people li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.28rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(107, 143, 113, 0.22);
+  font-size: 0.8rem;
+}
+
+.shift-team-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.shift-team-role {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.shift-team-role.supervisor {
+  color: var(--coffee);
+}
+
+.shift-joinable {
+  margin: 0 0 1rem;
+}
+
+.shift-joinable-card {
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius-md, 10px);
+  border: 1px solid rgba(93, 64, 55, 0.18);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.shift-joinable-card strong {
+  display: block;
+  font-size: 0.92rem;
+  color: var(--espresso);
+  margin-bottom: 0.25rem;
+}
+
+.shift-joinable-card p {
+  margin: 0;
+  font-size: 0.84rem;
+  color: var(--text-muted);
+  line-height: 1.45;
 }
 
 .shift-link-cta {
@@ -298,7 +392,10 @@
 .shift-panel[hidden],
 .shift-sell-hint[hidden],
 .shift-hero-actions[hidden],
-.shift-hero-aside[hidden] {
+.shift-hero-aside[hidden],
+.shift-member-wait[hidden],
+.shift-joinable[hidden],
+.shift-team-list[hidden] {
   display: none !important;
 }
 
@@ -1481,6 +1578,11 @@
   .shift-sell-hint {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .shift-member-wait {
+    max-width: none;
+    text-align: left;
   }
 
   .shift-link-cta {

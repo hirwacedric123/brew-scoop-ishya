@@ -164,6 +164,18 @@ function hasOpenShift() {
   return !!state.sellerShift?.has_open_shift;
 }
 
+function canCloseShift() {
+  return !!state.sellerShift?.can_close || !!state.sellerShift?.shift?.can_close;
+}
+
+function isShiftSupervisor() {
+  return (state.sellerShift?.my_role_on_shift || state.sellerShift?.shift?.my_role_on_shift) === "supervisor";
+}
+
+function getJoinableShift() {
+  return state.sellerShift?.joinable_shift || null;
+}
+
 const fmt = new Intl.NumberFormat("en-RW", { style: "currency", currency: "RWF", maximumFractionDigits: 0 });
 const fmtNum = new Intl.NumberFormat("en-RW");
 
@@ -1193,10 +1205,27 @@ function updateSellShiftUi() {
   const layout = document.getElementById("sell-layout");
   const checkoutBtn = document.getElementById("btn-complete-sale");
   const open = hasOpenShift();
+  const joinable = getJoinableShift();
+  const titleEl = document.getElementById("sell-shift-banner-title");
+  const textEl = document.getElementById("sell-shift-banner-text");
+  const btn = document.getElementById("btn-sell-start-shift");
 
   if (banner) banner.hidden = open;
   if (layout) layout.classList.toggle("sell-locked", !open);
   if (checkoutBtn) checkoutBtn.disabled = !open;
+
+  if (!open && titleEl && textEl && btn) {
+    if (joinable) {
+      const lead = joinable.supervisor_name || "a teammate";
+      titleEl.textContent = "Shift already open";
+      textEl.textContent = `Join the shift led by ${lead} to start selling.`;
+      btn.textContent = "Join Shift";
+    } else {
+      titleEl.textContent = "Shift not started";
+      textEl.textContent = "Start a shift before you can sell. The first person in becomes the supervisor.";
+      btn.textContent = "Start Shift";
+    }
+  }
 }
 
 function togglePosMode() {
@@ -1764,7 +1793,7 @@ function submitAddToCart(e) {
 
 async function completeCheckout() {
   if (isSeller() && !hasOpenShift()) {
-    toast("Start your shift before selling.", "error");
+    toast("Start or join a shift before selling.", "error");
     switchView("reconcile");
     return;
   }
@@ -2295,19 +2324,54 @@ function renderCashNotesBreakdown(cashNotes) {
 }
 
 function setShiftUiPhase(phase) {
+  if (phase === "close" && !canCloseShift()) {
+    toast("Only the shift supervisor can close and reconcile.", "error");
+    phase = "sell";
+  }
   shiftUiPhase = phase === "close" ? "close" : "sell";
   const data = state.sellerShift;
   if (data?.has_open_shift && data.shift) {
     const startedAt = formatDate(data.shift.opened_at);
     const descEl = document.getElementById("shift-hero-desc");
     if (descEl) {
-      descEl.textContent =
-        shiftUiPhase === "close"
-          ? `Started ${startedAt}. Enter what you collected for cash, MoMo, and Visa.`
-          : `Started ${startedAt}. Head to Sell to record orders — close when you're done.`;
+      const lead = data.shift.supervisor_name;
+      if (shiftUiPhase === "close") {
+        descEl.textContent = `Started ${startedAt}. Enter what was collected for cash, MoMo, and Visa for the whole team.`;
+      } else if (isShiftSupervisor()) {
+        descEl.textContent = `Started ${startedAt}. You are the shift supervisor — teammates can join and sell; only you close.`;
+      } else {
+        descEl.textContent = `Started ${startedAt}${lead ? ` · led by ${lead}` : ""}. Sell as usual — the supervisor will reconcile.`;
+      }
     }
   }
   renderShiftOpenPhase();
+}
+
+function renderShiftTeamList(shift) {
+  const listEl = document.getElementById("shift-team-list");
+  if (!listEl) return;
+  const members = (shift?.active_members || shift?.members || []).filter((m) => m.active !== false);
+  if (!members.length) {
+    listEl.hidden = true;
+    listEl.innerHTML = "";
+    return;
+  }
+  listEl.hidden = false;
+  listEl.innerHTML = `
+    <div class="shift-team-head">On this shift</div>
+    <ul class="shift-team-people">
+      ${members
+        .map((m) => {
+          const role =
+            m.role_on_shift === "supervisor" ? "Supervisor" : "Seller";
+          return `<li>
+            <span class="shift-team-name">${esc(m.display_name)}</span>
+            <span class="shift-team-role ${m.role_on_shift}">${role}</span>
+          </li>`;
+        })
+        .join("")}
+    </ul>
+  `;
 }
 
 function renderShiftOpenPhase() {
@@ -2317,21 +2381,37 @@ function renderShiftOpenPhase() {
   const panels = document.getElementById("shift-panels");
   const subtitle = document.getElementById("reconcile-subtitle");
   const view = document.getElementById("view-reconcile");
-  const closing = shiftUiPhase === "close";
+  const closeBtn = document.getElementById("btn-show-close");
+  const memberWait = document.getElementById("shift-member-wait");
+  const hintText = document.getElementById("shift-sell-hint-text");
+  const closing = shiftUiPhase === "close" && canCloseShift();
+  const supervisor = canCloseShift();
 
   if (sellHint) sellHint.hidden = closing;
   if (closeCard) closeCard.hidden = !closing;
   if (heroActions) heroActions.hidden = closing;
+  if (closeBtn) closeBtn.hidden = !supervisor;
+  if (memberWait) memberWait.hidden = supervisor;
+  if (hintText) {
+    hintText.textContent = supervisor
+      ? "Record sales on the Sell screen. When everyone is done, close and reconcile for the whole team."
+      : "Record sales on the Sell screen. The shift supervisor will close and reconcile cash, MoMo, and Visa.";
+  }
   if (panels) {
     panels.classList.remove("is-idle", "is-active", "is-closed", "is-selling", "is-closing");
     panels.classList.add(closing ? "is-closing" : "is-selling");
   }
   if (view) view.classList.toggle("is-closing-shift", closing);
   if (subtitle) {
-    subtitle.textContent = closing
-      ? "Enter cash, MoMo, and Visa totals — then tap Close & reconcile."
-      : "Sell during your shift, then reconcile cash, MoMo, and Visa to close.";
+    if (closing) {
+      subtitle.textContent = "Enter cash, MoMo, and Visa totals for the whole team — then tap Close & reconcile.";
+    } else if (supervisor) {
+      subtitle.textContent = "You opened first, so you are the shift supervisor. Teammates can join and sell; only you balance and close.";
+    } else {
+      subtitle.textContent = "You joined this shift as a seller. Sell as usual — the supervisor will close and reconcile.";
+    }
   }
+  renderShiftTeamList(state.sellerShift?.shift);
   updateShiftSteps(closing ? "close" : "sell");
 }
 
@@ -2604,10 +2684,15 @@ function renderShiftView() {
   const sellHint = document.getElementById("shift-sell-hint");
   const heroActions = document.getElementById("shift-hero-actions");
   const view = document.getElementById("view-reconcile");
+  const joinableEl = document.getElementById("shift-joinable");
+  const startTitle = document.getElementById("shift-start-title");
+  const startDesc = document.getElementById("shift-start-desc");
+  const startLabel = document.getElementById("btn-start-shift-label");
 
   const data = state.sellerShift;
   const open = data?.has_open_shift;
   const closedShift = !open && (data?.shift?.status === "closed" ? data.shift : data?.last_closed);
+  const joinable = !open && !closedShift ? getJoinableShift() : null;
 
   if (startCard) startCard.hidden = open || !!closedShift;
   if (resultCard) resultCard.hidden = !closedShift;
@@ -2616,18 +2701,47 @@ function renderShiftView() {
   if (heroActions) heroActions.hidden = true;
   if (view && !open) view.classList.remove("is-closing-shift");
 
+  if (joinableEl) {
+    if (joinable) {
+      joinableEl.hidden = false;
+      const names = (joinable.members || [])
+        .map((m) => esc(m.display_name))
+        .join(", ");
+      joinableEl.innerHTML = `
+        <div class="shift-joinable-card">
+          <strong>Open shift led by ${esc(joinable.supervisor_name || "a teammate")}</strong>
+          <p>${joinable.member_count || 1} seller${(joinable.member_count || 1) === 1 ? "" : "s"} on shift${names ? `: ${names}` : ""}.</p>
+        </div>`;
+    } else {
+      joinableEl.hidden = true;
+      joinableEl.innerHTML = "";
+    }
+  }
+  if (startTitle) startTitle.textContent = joinable ? "Join shift" : "Start shift";
+  if (startDesc) {
+    startDesc.textContent = joinable
+      ? "A shift is already open. Join it to sell — the person who started it remains the supervisor for balancing."
+      : "Tap start when you are ready to sell. If others join later, you stay the supervisor and close for everyone.";
+  }
+  if (startLabel) startLabel.textContent = joinable ? "Join shift" : "Start shift";
+
   if (open && data.shift) {
     const startedAt = formatDate(data.shift.opened_at);
+    const lead = data.shift.supervisor_name;
+    const iAmLead = canCloseShift();
     updateShiftHero(
       "open",
-      "Your shift is live",
-      shiftUiPhase === "close"
-        ? `Started ${startedAt}. Enter what you collected for cash, MoMo, and Visa.`
-        : `Started ${startedAt}. Head to Sell to record orders — close when you're done.`,
-      "In progress",
+      iAmLead ? "Your shift is live — you are supervisor" : "You joined this shift",
+      shiftUiPhase === "close" && iAmLead
+        ? `Started ${startedAt}. Enter what was collected for cash, MoMo, and Visa for the whole team.`
+        : iAmLead
+          ? `Started ${startedAt}. Teammates can join and sell; only you close and reconcile.`
+          : `Started ${startedAt}${lead ? ` · led by ${lead}` : ""}. Sell as usual — the supervisor will reconcile.`,
+      iAmLead ? "Supervisor" : "Joined",
       "open"
     );
     startShiftTimer(data.shift.opened_at);
+    if (shiftUiPhase === "close" && !iAmLead) shiftUiPhase = "sell";
     renderShiftOpenPhase();
   } else if (closedShift && resultCard) {
     shiftUiPhase = "sell";
@@ -2636,9 +2750,11 @@ function renderShiftView() {
     shiftUiPhase = "sell";
     updateShiftHero(
       "idle",
-      "Ready to start your shift",
-      "Tap start when you are at the counter. Sales stay hidden until you close and enter your total.",
-      "Not started",
+      joinable ? "Join the open shift" : "Ready to start your shift",
+      joinable
+        ? `Join the shift led by ${joinable.supervisor_name || "a teammate"} to sell on the same till.`
+        : "Tap start when you are at the counter. The first person in becomes supervisor and closes for the team.",
+      joinable ? "Join available" : "Not started",
       "idle"
     );
     setShiftPanelsMode("is-idle");
@@ -2650,12 +2766,15 @@ async function loadReconcileView() {
   if (!isSeller()) return;
 
   updateShiftDateBadge();
-  shiftUiPhase = pendingShiftUiPhase === "close" ? "close" : "sell";
+  const wantClose = pendingShiftUiPhase === "close";
   pendingShiftUiPhase = null;
+  shiftUiPhase = "sell";
 
   try {
     await refreshSellerShift();
+    shiftUiPhase = wantClose && canCloseShift() ? "close" : "sell";
     renderShiftView();
+    updateSellShiftUi();
     if (shiftUiPhase === "close") {
       document.getElementById("cash-note-5000")?.focus();
     }
@@ -2685,7 +2804,7 @@ async function startSellerShift({ button, goToSell = false } = {}) {
     });
     state.sellerShift = data;
     shiftUiPhase = "sell";
-    toast(data.message || "Shift started — you can sell now");
+    toast(data.message || (data.joined ? "Joined shift — you can sell now" : "Shift started — you can sell now"));
     renderShiftView();
     updateSellShiftUi();
     if (goToSell) switchView("sell");
@@ -2725,6 +2844,10 @@ async function startShiftFromSell() {
 async function submitCloseShift(e) {
   e.preventDefault();
   if (!isSeller()) return;
+  if (!canCloseShift()) {
+    toast("Only the shift supervisor can close and reconcile.", "error");
+    return;
+  }
 
   const btn = document.getElementById("btn-reconcile");
   const cashNotes = readCashNotesFromForm();
@@ -2760,6 +2883,8 @@ async function submitCloseShift(e) {
     });
     state.sellerShift = {
       has_open_shift: false,
+      can_close: false,
+      my_role_on_shift: null,
       shift: data.shift,
       last_closed: data.shift,
     };
@@ -3144,6 +3269,14 @@ function buildShiftListItemHtml(shift, selectedId, maxSales, selectFn) {
       ? `Started ${formatTime(shift.opened_at)} · ${formatShiftDuration(shift.opened_at, true)}`
       : `${formatTime(shift.opened_at)} → ${formatTime(shift.closed_at)}`;
   const sellerName = isSeller() ? "Your shift" : esc(shift.seller_name);
+  const memberNames = (shift.members || [])
+    .filter((m) => m.role_on_shift !== "supervisor")
+    .map((m) => m.display_name)
+    .filter(Boolean);
+  const teamLine =
+    !isSeller() && memberNames.length
+      ? `<span class="shift-list-meta">With ${esc(memberNames.join(", "))}</span>`
+      : "";
   const concernBadge = shiftHasReport(shift)
     ? '<span class="shift-concern-badge" title="Seller left an end-of-shift report">!</span>'
     : "";
@@ -3157,6 +3290,7 @@ function buildShiftListItemHtml(shift, selectedId, maxSales, selectFn) {
           ${statusBadge}${concernBadge}
         </div>
         <span class="shift-list-meta">${timeLine}</span>
+        ${teamLine}
         <span class="shift-list-meta">${salesMeta}</span>
       </div>
       <div class="sales-date-revenue">${fmt.format(shift.total_sales)}</div>
@@ -4357,6 +4491,23 @@ async function logout() {
       // If status check fails, still allow logout without blocking.
     }
     if (hasOpenShift()) {
+      const msg = document.getElementById("logout-shift-message");
+      const closeBtn = document.getElementById("logout-go-close-shift");
+      if (canCloseShift()) {
+        if (msg) {
+          msg.textContent =
+            "You still have an open shift and you are the supervisor. Close it so cash, MoMo, and Visa can be reconciled — or log out anyway if you will come back.";
+        }
+        if (closeBtn) closeBtn.hidden = false;
+      } else {
+        const lead = state.sellerShift?.shift?.supervisor_name;
+        if (msg) {
+          msg.textContent = lead
+            ? `You are on an open shift led by ${lead}. You can log out — they will close and reconcile when ready.`
+            : "You are on an open shift as a seller. You can log out — the supervisor will close and reconcile when ready.";
+        }
+        if (closeBtn) closeBtn.hidden = true;
+      }
       showModal("logout-shift-modal");
       return;
     }
@@ -4366,6 +4517,10 @@ async function logout() {
 
 async function goCloseShiftFromLogout() {
   hideModal("logout-shift-modal");
+  if (!canCloseShift()) {
+    toast("Only the shift supervisor can close and reconcile.", "error");
+    return;
+  }
   pendingShiftUiPhase = "close";
   switchView("reconcile");
 }
@@ -4733,6 +4888,11 @@ document.addEventListener("DOMContentLoaded", () => {
       await refreshSellerShift();
     } catch (err) {
       toast(err.message, "error");
+    }
+    if (!canCloseShift()) {
+      toast("Only the shift supervisor can close and reconcile.", "error");
+      renderShiftOpenPhase();
+      return;
     }
     setShiftUiPhase("close");
     document.getElementById("cash-note-5000")?.focus();

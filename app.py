@@ -311,6 +311,28 @@ def _migrate_db(db):
         if col not in shift_cols:
             db.execute(f"ALTER TABLE seller_shifts ADD COLUMN {col} TEXT")
 
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS shift_members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            shift_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            role_on_shift TEXT NOT NULL CHECK(role_on_shift IN ('supervisor', 'member')),
+            joined_at TEXT NOT NULL,
+            left_at TEXT,
+            FOREIGN KEY (shift_id) REFERENCES seller_shifts(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            UNIQUE(shift_id, user_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_shift_members_user
+            ON shift_members(user_id, left_at);
+        CREATE INDEX IF NOT EXISTS idx_shift_members_shift
+            ON shift_members(shift_id);
+        """
+    )
+    _backfill_shift_members(db)
+
     tx_cols = {row[1] for row in db.execute("PRAGMA table_info(transactions)").fetchall()}
     if "voided_at" not in tx_cols:
         db.execute("ALTER TABLE transactions ADD COLUMN voided_at TEXT")
@@ -337,6 +359,25 @@ def _migrate_db(db):
             ON seller_sessions(user_id, logged_out_at);
         """
     )
+
+
+def _backfill_shift_members(db):
+    """Ensure every existing shift has its owner recorded as shift supervisor."""
+    missing = db.execute(
+        """SELECT s.id, s.user_id, s.opened_at, s.closed_at, s.status
+           FROM seller_shifts s
+           WHERE NOT EXISTS (
+               SELECT 1 FROM shift_members m WHERE m.shift_id = s.id
+           )"""
+    ).fetchall()
+    for row in missing:
+        left_at = row["closed_at"] if row["status"] == "closed" else None
+        db.execute(
+            """INSERT INTO shift_members
+               (shift_id, user_id, role_on_shift, joined_at, left_at)
+               VALUES (?, ?, 'supervisor', ?, ?)""",
+            (row["id"], row["user_id"], row["opened_at"], left_at),
+        )
 
 
 def _migrate_users_role_check(db):
@@ -1210,6 +1251,39 @@ def admin_delete_user(user_id):
     if not row:
         return jsonify({"error": "User not found"}), 404
 
+    # Shared shifts owned by this user: hand ownership to another member first
+    # so CASCADE does not wipe a live multi-seller shift.
+    owned_shifts = db.execute(
+        "SELECT id FROM seller_shifts WHERE user_id = ?",
+        (user_id,),
+    ).fetchall()
+    for owned in owned_shifts:
+        successor = db.execute(
+            """SELECT user_id FROM shift_members
+               WHERE shift_id = ? AND user_id != ?
+               ORDER BY
+                 CASE role_on_shift WHEN 'supervisor' THEN 0 ELSE 1 END,
+                 joined_at ASC
+               LIMIT 1""",
+            (owned["id"], user_id),
+        ).fetchone()
+        if successor:
+            db.execute(
+                "UPDATE seller_shifts SET user_id = ? WHERE id = ?",
+                (successor["user_id"], owned["id"]),
+            )
+            db.execute(
+                """UPDATE shift_members SET role_on_shift = 'supervisor'
+                   WHERE shift_id = ? AND user_id = ?""",
+                (owned["id"], successor["user_id"]),
+            )
+        else:
+            db.execute(
+                "UPDATE transactions SET shift_id = NULL WHERE shift_id = ?",
+                (owned["id"],),
+            )
+
+    db.execute("DELETE FROM shift_members WHERE user_id = ?", (user_id,))
     # transactions.user_id, voided_by, and shift_id were added via ALTER TABLE
     # without ON DELETE CASCADE, so NULL them out before deleting the user.
     # shift_id must be cleared first because seller_shifts cascade-deletes with the user.
@@ -1599,7 +1673,7 @@ def create_sale():
     if user["role"] == "seller":
         shift = get_open_seller_shift(db, user["id"])
         if not shift:
-            return jsonify({"error": "Start your shift before selling."}), 400
+            return jsonify({"error": "Start or join a shift before selling."}), 400
         shift_id = shift["id"]
     result, error, status = _execute_checkout(
         db, items, data.get("notes"), data.get("payment_method"), user["id"], shift_id
@@ -1635,7 +1709,7 @@ def checkout_sale():
     if user["role"] == "seller":
         shift = get_open_seller_shift(db, user["id"])
         if not shift:
-            return jsonify({"error": "Start your shift before selling."}), 400
+            return jsonify({"error": "Start or join a shift before selling."}), 400
         shift_id = shift["id"]
     result, error, status = _execute_checkout(
         db, items, data.get("notes"), data.get("payment_method"), user["id"], shift_id
@@ -1768,11 +1842,124 @@ def void_sale():
     return jsonify({**result, "message": "Sale voided and stock restored"})
 
 
-def get_open_seller_shift(db, user_id):
+def get_open_store_shift(db):
+    """Return the single open store shift, if any."""
     return db.execute(
         """SELECT * FROM seller_shifts
-           WHERE user_id = ? AND status = 'open'
-           ORDER BY opened_at DESC
+           WHERE status = 'open'
+           ORDER BY opened_at ASC
+           LIMIT 1"""
+    ).fetchone()
+
+
+def get_open_seller_shift(db, user_id):
+    """Return the open shift this seller is currently a member of."""
+    return db.execute(
+        """SELECT s.*
+           FROM seller_shifts s
+           JOIN shift_members m ON m.shift_id = s.id
+           WHERE s.status = 'open'
+             AND m.user_id = ?
+             AND m.left_at IS NULL
+           ORDER BY s.opened_at DESC
+           LIMIT 1""",
+        (user_id,),
+    ).fetchone()
+
+
+def get_shift_membership(db, shift_id, user_id):
+    return db.execute(
+        """SELECT * FROM shift_members
+           WHERE shift_id = ? AND user_id = ? AND left_at IS NULL""",
+        (shift_id, user_id),
+    ).fetchone()
+
+
+def _list_shift_members(db, shift_id):
+    rows = db.execute(
+        """SELECT m.user_id, m.role_on_shift, m.joined_at, m.left_at,
+                  u.display_name
+           FROM shift_members m
+           JOIN users u ON u.id = m.user_id
+           WHERE m.shift_id = ?
+           ORDER BY
+             CASE m.role_on_shift WHEN 'supervisor' THEN 0 ELSE 1 END,
+             m.joined_at ASC""",
+        (shift_id,),
+    ).fetchall()
+    return [
+        {
+            "user_id": row["user_id"],
+            "display_name": row["display_name"],
+            "role_on_shift": row["role_on_shift"],
+            "joined_at": row["joined_at"],
+            "left_at": row["left_at"],
+            "active": row["left_at"] is None,
+        }
+        for row in rows
+    ]
+
+
+def _add_shift_member(db, shift_id, user_id, role_on_shift, joined_at):
+    db.execute(
+        """INSERT INTO shift_members
+           (shift_id, user_id, role_on_shift, joined_at, left_at)
+           VALUES (?, ?, ?, ?, NULL)""",
+        (shift_id, user_id, role_on_shift, joined_at),
+    )
+
+
+def _shift_payload_for_user(db, row, user_id, include_close=False):
+    data = _row_to_shift(row, include_close=include_close)
+    members = _list_shift_members(db, row["id"])
+    active = [m for m in members if m["active"]]
+    membership = next((m for m in active if m["user_id"] == user_id), None)
+    supervisor = next(
+        (m for m in members if m["role_on_shift"] == "supervisor"),
+        None,
+    )
+    my_role = membership["role_on_shift"] if membership else None
+    data["members"] = members
+    data["active_members"] = active
+    data["supervisor_user_id"] = row["user_id"]
+    data["supervisor_name"] = (
+        supervisor["display_name"] if supervisor else None
+    )
+    data["my_role_on_shift"] = my_role
+    data["can_close"] = my_role == "supervisor" and row["status"] == "open"
+    return data
+
+
+def _joinable_shift_summary(db, row):
+    members = _list_shift_members(db, row["id"])
+    active = [m for m in members if m["active"]]
+    supervisor = next(
+        (m for m in active if m["role_on_shift"] == "supervisor"),
+        None,
+    )
+    return {
+        "id": row["id"],
+        "opened_at": row["opened_at"],
+        "supervisor_name": supervisor["display_name"] if supervisor else None,
+        "member_count": len(active),
+        "members": [
+            {
+                "user_id": m["user_id"],
+                "display_name": m["display_name"],
+                "role_on_shift": m["role_on_shift"],
+            }
+            for m in active
+        ],
+    }
+
+
+def _last_closed_shift_for_user(db, user_id):
+    return db.execute(
+        """SELECT s.*
+           FROM seller_shifts s
+           JOIN shift_members m ON m.shift_id = s.id
+           WHERE s.status = 'closed' AND m.user_id = ?
+           ORDER BY s.closed_at DESC
            LIMIT 1""",
         (user_id,),
     ).fetchone()
@@ -1990,23 +2177,27 @@ def seller_shift_status():
     user = get_current_user(db)
     open_shift = get_open_seller_shift(db, user["id"])
     if open_shift:
-        shift_data = _row_to_shift(open_shift)
+        shift_data = _shift_payload_for_user(db, open_shift, user["id"])
         return jsonify({
             "has_open_shift": True,
+            "can_close": shift_data["can_close"],
+            "my_role_on_shift": shift_data["my_role_on_shift"],
             "shift": shift_data,
         })
 
-    last_closed = db.execute(
-        """SELECT * FROM seller_shifts
-           WHERE user_id = ? AND status = 'closed'
-           ORDER BY closed_at DESC
-           LIMIT 1""",
-        (user["id"],),
-    ).fetchone()
+    store_shift = get_open_store_shift(db)
+    last_closed = _last_closed_shift_for_user(db, user["id"])
 
-    payload = {"has_open_shift": False}
+    payload = {"has_open_shift": False, "can_close": False, "my_role_on_shift": None}
+    if store_shift:
+        payload["joinable_shift"] = _joinable_shift_summary(db, store_shift)
     if last_closed:
-        payload["last_closed"] = _shift_with_sales(db, last_closed, include_close=True)
+        closed = _shift_with_sales(db, last_closed, include_close=True)
+        closed_payload = _shift_payload_for_user(
+            db, last_closed, user["id"], include_close=True
+        )
+        closed_payload["sales"] = closed.get("sales", [])
+        payload["last_closed"] = closed_payload
     return jsonify(payload)
 
 
@@ -2019,21 +2210,63 @@ def seller_shift_start():
         return jsonify({"error": "You already have an open shift."}), 409
 
     ts = now_iso()
+    store_shift = get_open_store_shift(db)
+
+    if store_shift:
+        # Join the live shift as a regular seller; first entrant stays supervisor.
+        existing = db.execute(
+            """SELECT * FROM shift_members
+               WHERE shift_id = ? AND user_id = ?""",
+            (store_shift["id"], user["id"]),
+        ).fetchone()
+        if existing and existing["left_at"] is None:
+            return jsonify({"error": "You already have an open shift."}), 409
+        if existing:
+            db.execute(
+                """UPDATE shift_members
+                   SET left_at = NULL, joined_at = ?, role_on_shift = 'member'
+                   WHERE id = ?""",
+                (ts, existing["id"]),
+            )
+        else:
+            _add_shift_member(db, store_shift["id"], user["id"], "member", ts)
+        db.commit()
+        row = db.execute(
+            "SELECT * FROM seller_shifts WHERE id = ?",
+            (store_shift["id"],),
+        ).fetchone()
+        shift_data = _shift_payload_for_user(db, row, user["id"])
+        supervisor = shift_data.get("supervisor_name") or "the supervisor"
+        return jsonify({
+            "has_open_shift": True,
+            "can_close": False,
+            "my_role_on_shift": "member",
+            "joined": True,
+            "shift": shift_data,
+            "message": f"Joined the open shift led by {supervisor}. You can sell now.",
+        }), 201
+
     cur = db.execute(
         """INSERT INTO seller_shifts
            (user_id, status, opened_at, opening_float)
            VALUES (?, 'open', ?, 0)""",
         (user["id"], ts),
     )
+    shift_id = cur.lastrowid
+    _add_shift_member(db, shift_id, user["id"], "supervisor", ts)
     db.commit()
     row = db.execute(
         "SELECT * FROM seller_shifts WHERE id = ?",
-        (cur.lastrowid,),
+        (shift_id,),
     ).fetchone()
+    shift_data = _shift_payload_for_user(db, row, user["id"])
     return jsonify({
         "has_open_shift": True,
-        "shift": _row_to_shift(row),
-        "message": "Shift started. You can sell now.",
+        "can_close": True,
+        "my_role_on_shift": "supervisor",
+        "joined": False,
+        "shift": shift_data,
+        "message": "Shift started. You are the shift supervisor and can close & reconcile when done.",
     }), 201
 
 
@@ -2094,7 +2327,23 @@ def seller_shift_close():
     user = get_current_user(db)
     shift = get_open_seller_shift(db, user["id"])
     if not shift:
-        return jsonify({"error": "No open shift to close. Start a shift first."}), 400
+        return jsonify({"error": "No open shift to close. Start or join a shift first."}), 400
+
+    membership = get_shift_membership(db, shift["id"], user["id"])
+    if not membership or membership["role_on_shift"] != "supervisor":
+        supervisor_name = None
+        members = _list_shift_members(db, shift["id"])
+        for member in members:
+            if member["role_on_shift"] == "supervisor" and member["active"]:
+                supervisor_name = member["display_name"]
+                break
+        led_by = f" led by {supervisor_name}" if supervisor_name else ""
+        return jsonify({
+            "error": (
+                f"Only the shift supervisor{led_by} can close and reconcile. "
+                "Keep selling — they will balance the till."
+            )
+        }), 403
 
     sales = _seller_sales_for_shift(db, shift["id"])
     expected_cash = sales["cash_sales"]
@@ -2165,20 +2414,36 @@ def seller_shift_close():
             shift["id"],
         ),
     )
+    db.execute(
+        """UPDATE shift_members SET left_at = ?
+           WHERE shift_id = ? AND left_at IS NULL""",
+        (ts, shift["id"]),
+    )
     db.commit()
     row = db.execute(
         "SELECT * FROM seller_shifts WHERE id = ?",
         (shift["id"],),
     ).fetchone()
-    closed = _shift_with_sales(db, row, include_close=True)
+    closed = _shift_payload_for_user(db, row, user["id"], include_close=True)
+    closed["sales"] = _shift_sales_for_response(db, row["id"])
     message = _shift_close_message(row)
 
     seller_name = user["display_name"] if "display_name" in user.keys() else "Seller"
+    member_names = [
+        m["display_name"]
+        for m in closed.get("members") or []
+        if m["role_on_shift"] != "supervisor"
+    ]
+    if member_names:
+        seller_name = f"{seller_name} (+ {', '.join(member_names)})"
+
     recipients = _collect_shift_admin_recipients(db)
     _dispatch_shift_close_email(recipients, closed, seller_name)
 
     return jsonify({
         "has_open_shift": False,
+        "can_close": False,
+        "my_role_on_shift": None,
         "shift": closed,
         "message": message,
     })
@@ -2499,6 +2764,12 @@ def _shift_report_row(db, row):
         "closed_at": row["closed_at"],
     }
     data.update(_shift_report_fields(row))
+    members = _list_shift_members(db, row["id"])
+    data["members"] = members
+    data["supervisor_name"] = next(
+        (m["display_name"] for m in members if m["role_on_shift"] == "supervisor"),
+        row["seller_name"],
+    )
     if row["status"] == "closed":
         cash_variance = round(row["variance"] or 0, 2)
         momo_variance = round(row["momo_variance"] or 0, 2)
@@ -2616,8 +2887,12 @@ def shifts_report():
     user_params = []
     uid = _parse_user_id_filter(user_id)
     if uid is not None:
-        user_clause = " AND s.user_id = ?"
-        user_params = [uid]
+        user_clause = (
+            " AND (s.user_id = ? OR EXISTS ("
+            "SELECT 1 FROM shift_members m "
+            "WHERE m.shift_id = s.id AND m.user_id = ?))"
+        )
+        user_params = [uid, uid]
 
     rows = db.execute(
         f"""SELECT s.*, u.display_name AS seller_name
