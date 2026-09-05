@@ -814,25 +814,18 @@ def _session_duration_seconds(row):
 def auth_login():
     data = request.get_json(silent=True) or {}
     pin = normalize_pin(data.get("pin"))
-    username = (data.get("username") or "").strip()
-    password = data.get("password") or ""
+
+    if not pin:
+        return jsonify({"error": "Enter your PIN to sign in"}), 400
+
+    error, pin = validate_pin(pin)
+    if error:
+        return jsonify({"error": error}), 400
 
     db = get_db()
-    row = None
-
-    if pin:
-        error, pin = validate_pin(pin)
-        if error:
-            return jsonify({"error": error}), 400
-        row = get_user_by_pin(db, pin)
-        if not row:
-            return jsonify({"error": "Invalid PIN"}), 401
-    elif username and password:
-        row = get_user_by_username(db, username)
-        if not row or not row["is_active"] or not verify_password(row["password_hash"], password):
-            return jsonify({"error": "Invalid username or password"}), 401
-    else:
-        return jsonify({"error": "Enter your PIN to sign in"}), 400
+    row = get_user_by_pin(db, pin)
+    if not row:
+        return jsonify({"error": "Invalid PIN"}), 401
 
     login_user(row["id"])
     _start_seller_session(db, row["id"])
