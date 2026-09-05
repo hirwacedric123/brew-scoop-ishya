@@ -24,6 +24,8 @@ const state = {
   sellers: [],
   cart: [],
   paymentMethod: null,
+  selectedTableId: null,
+  serviceTables: [],
   posMode: false,
   sellCategory: "",
   sellSearch: "",
@@ -66,6 +68,7 @@ function saveUIState() {
       JSON.stringify({
         cart: state.cart,
         paymentMethod: state.paymentMethod,
+        selectedTableId: state.selectedTableId,
         posMode: state.posMode,
         activeView,
         sellCategory: state.sellCategory,
@@ -92,6 +95,7 @@ function restoreUIState() {
     if (Array.isArray(saved.cart) && saved.cart.length)
       state.cart = saved.cart;
     if (saved.paymentMethod) state.paymentMethod = saved.paymentMethod;
+    if (saved.selectedTableId) state.selectedTableId = saved.selectedTableId;
     if (typeof saved.posMode === "boolean") state.posMode = saved.posMode;
     if (saved.sellCategory) {
       state.sellCategory = saved.sellCategory;
@@ -126,12 +130,13 @@ function applyRestoredPosMode() {
 
 function applyRestoredPaymentMethod() {
   if (!state.paymentMethod) return;
-  document.querySelectorAll(".payment-chip").forEach((chip) => {
+  document.querySelectorAll("#payment-methods .payment-chip").forEach((chip) => {
     chip.classList.toggle(
       "active",
       chip.dataset.method === state.paymentMethod
     );
   });
+  syncPaymentCheckoutUi();
 }
 
 function isSeller() {
@@ -179,7 +184,7 @@ function getJoinableShift() {
 const fmt = new Intl.NumberFormat("en-RW", { style: "currency", currency: "RWF", maximumFractionDigits: 0 });
 const fmtNum = new Intl.NumberFormat("en-RW");
 
-const PAYMENT_LABELS = { momo: "MoMo", cash: "Cash", visa: "Visa" };
+const PAYMENT_LABELS = { momo: "MoMo", cash: "Cash", visa: "Visa", credit: "Credit" };
 
 const DEFAULT_CATEGORY_NAMES = ["Shared Cups", "Individuals"];
 
@@ -203,18 +208,81 @@ function sellerLabel(transaction) {
 
 function clearPaymentMethod() {
   state.paymentMethod = null;
-  document.querySelectorAll(".payment-chip").forEach((chip) => chip.classList.remove("active"));
+  document.querySelectorAll("#payment-methods .payment-chip").forEach((chip) => chip.classList.remove("active"));
+  syncPaymentCheckoutUi();
+}
+
+function syncPaymentCheckoutUi() {
+  const isCredit = state.paymentMethod === "credit";
+  const notesReq = document.getElementById("sell-notes-required");
+  const hint = document.getElementById("sell-credit-hint");
+  const notes = document.getElementById("sell-notes");
+  const btn = document.getElementById("btn-complete-sale");
+  if (notesReq) notesReq.hidden = !isCredit;
+  if (hint) hint.hidden = !isCredit;
+  if (notes) {
+    notes.placeholder = isCredit
+      ? "Customer name (required for credit)"
+      : "Customer name, order ref...";
+  }
+  if (btn && !btn.disabled) {
+    btn.textContent = isCredit ? "Record Credit" : "Receive Payment";
+  }
+}
+
+async function loadServiceTables() {
+  try {
+    state.serviceTables = await api("/api/tables");
+    populateSellTableSelect();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+function populateSellTableSelect() {
+  const select = document.getElementById("sell-table");
+  if (!select) return;
+  const current = state.selectedTableId ? String(state.selectedTableId) : select.value;
+  select.innerHTML =
+    '<option value="">Choose a table...</option>' +
+    (state.serviceTables || [])
+      .map(
+        (t) =>
+          `<option value="${t.id}">${esc(t.name)}</option>`
+      )
+      .join("");
+  if (current && [...select.options].some((o) => o.value === current)) {
+    select.value = current;
+    state.selectedTableId = Number(current);
+  } else {
+    state.selectedTableId = null;
+  }
+}
+
+function initSellTableSelect() {
+  const select = document.getElementById("sell-table");
+  if (!select) return;
+  select.addEventListener("change", () => {
+    state.selectedTableId = select.value ? Number(select.value) : null;
+    saveUIState();
+  });
+}
+
+function tableLabel(row) {
+  return esc(row?.table_name || "—");
 }
 
 function initPaymentMethods() {
-  document.querySelectorAll(".payment-chip").forEach((chip) => {
+  document.querySelectorAll("#payment-methods .payment-chip").forEach((chip) => {
     chip.addEventListener("click", () => {
-      document.querySelectorAll(".payment-chip").forEach((c) => c.classList.remove("active"));
+      document.querySelectorAll("#payment-methods .payment-chip").forEach((c) => c.classList.remove("active"));
       chip.classList.add("active");
       state.paymentMethod = chip.dataset.method;
+      syncPaymentCheckoutUi();
       saveUIState();
     });
   });
+  syncPaymentCheckoutUi();
 }
 
 const UI_ICONS = {
@@ -814,6 +882,138 @@ function renderCategoryDonutChart(categories) {
   });
 }
 
+function saleStatusLabel(status) {
+  if (status === "credit") return { text: "Credit", cls: "credit" };
+  if (status === "voided") return { text: "Voided", cls: "voided" };
+  if (status === "paid") return { text: "Paid", cls: "paid" };
+  return { text: status || "—", cls: "" };
+}
+
+function renderDashboardSaleActivity(d) {
+  const body = document.getElementById("dashboard-activity-body");
+  const pill = document.getElementById("credit-outstanding-pill");
+  const sub = document.getElementById("dashboard-activity-sub");
+  if (!body) return;
+
+  if (pill) {
+    const amount = d.credit_outstanding || 0;
+    const count = d.credit_open_sales || 0;
+    if (amount > 0) {
+      pill.hidden = false;
+      pill.className = "status-pill status-pill-warn";
+      pill.textContent = `${fmt.format(amount)} on credit (${count})`;
+    } else {
+      pill.hidden = true;
+    }
+  }
+  if (sub) {
+    sub.textContent = countLabel(d.sale_activity?.length || 0, "recent checkout", "recent checkouts");
+  }
+
+  const rows = d.sale_activity || [];
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="8">${emptyState(
+      UI_ICONS.sales,
+      "No sales yet",
+      "Checkouts appear here as soon as sellers record them.",
+      true
+    )}</td></tr>`;
+    return;
+  }
+
+  body.innerHTML = rows
+    .map((sale) => {
+      const status = saleStatusLabel(sale.status_label);
+      const products = (sale.items || [])
+        .map((item) => `${esc(item.product_name)} ×${item.quantity}`)
+        .join(", ");
+      const notes = sale.notes ? `<div class="activity-note">${esc(sale.notes)}</div>` : "";
+      const settleBtn =
+        sale.status_label === "credit" && !sale.is_voided
+          ? `<button type="button" class="btn btn-ghost btn-sm" data-settle-credit="${escAttr(
+              sale.checkout_ref
+            )}">Mark paid</button>`
+          : "";
+      const settled =
+        sale.settled_method && sale.status_label === "paid" && sale.payment_method === "credit"
+          ? `<div class="activity-note">Settled via ${esc(paymentMethodLabel(sale.settled_method))}</div>`
+          : "";
+      return `
+        <tr class="dashboard-activity-row status-${status.cls}">
+          <td>
+            <strong>${esc(formatTime(sale.created_at))}</strong>
+            <div class="text-muted activity-date">${esc(
+              sale.created_at ? formatDateLabel(sale.created_at.slice(0, 10)) : ""
+            )}</div>
+          </td>
+          <td><strong>${esc(sale.table_name || "—")}</strong></td>
+          <td>
+            <div class="activity-products">${products || "—"}</div>
+            ${notes}${settled}
+          </td>
+          <td>${esc(sale.seller_name || "—")}</td>
+          <td>${esc(paymentMethodLabel(sale.payment_method))}</td>
+          <td><span class="sale-status-badge ${status.cls}">${status.text}</span></td>
+          <td><strong>${fmt.format(sale.total_amount)}</strong></td>
+          <td class="dashboard-activity-actions">${settleBtn}</td>
+        </tr>`;
+    })
+    .join("");
+}
+
+function countLabel(n, one, many) {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+let pendingSettleCheckoutRef = null;
+let pendingSettleMethod = null;
+
+function openSettleCreditModal(checkoutRef) {
+  const sale = (state.dashboard?.sale_activity || []).find((s) => s.checkout_ref === checkoutRef);
+  pendingSettleCheckoutRef = checkoutRef;
+  pendingSettleMethod = null;
+  document.querySelectorAll("#settle-payment-methods .payment-chip").forEach((c) => c.classList.remove("active"));
+  const summary = document.getElementById("settle-credit-summary");
+  if (summary) {
+    if (sale) {
+      const products = (sale.items || []).map((i) => `${i.product_name} ×${i.quantity}`).join(", ");
+      summary.textContent = `${products} · ${fmt.format(sale.total_amount)}${
+        sale.notes ? ` · ${sale.notes}` : ""
+      }`;
+    } else {
+      summary.textContent = checkoutRef;
+    }
+  }
+  showModal("settle-credit-modal");
+}
+
+async function submitSettleCredit(e) {
+  e.preventDefault();
+  if (!pendingSettleCheckoutRef) return;
+  if (!pendingSettleMethod) {
+    toast("Select how it was paid: Cash, MoMo, or Visa", "error");
+    return;
+  }
+  const btn = document.getElementById("btn-settle-credit");
+  btn.disabled = true;
+  try {
+    const data = await api("/api/sales/settle-credit", {
+      method: "POST",
+      body: JSON.stringify({
+        checkout_ref: pendingSettleCheckoutRef,
+        payment_method: pendingSettleMethod,
+      }),
+    });
+    hideModal("settle-credit-modal");
+    toast(data.message || "Credit marked as paid", "success");
+    await loadDashboard();
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function renderDashboard(d) {
   const todayLabel = d.today_date
     ? formatDateLabel(d.today_date)
@@ -937,6 +1137,8 @@ function renderDashboard(d) {
 
   requestAnimationFrame(() => renderRevenueChart(d.daily_revenue_7d || [], d.today_date));
 
+  renderDashboardSaleActivity(d);
+
   const recent = document.getElementById("recent-activity");
   if (!d.recent_transactions.length) {
     recent.innerHTML = emptyState(UI_ICONS.clock, "No activity yet", "Transactions will appear here.", true);
@@ -948,7 +1150,11 @@ function renderDashboard(d) {
         <div class="activity-dot ${t.type}"></div>
         <div class="activity-body">
           <strong>${esc(t.product_name)}</strong>
-          <span>${formatDate(t.created_at)} · ${typeBadge(t.type)}</span>
+          <span>${formatDate(t.created_at)} · ${typeBadge(t.type)}${
+            t.type === "sale"
+              ? ` · ${esc(t.table_name || "—")} · ${esc(paymentMethodLabel(t.payment_method))} · ${esc(saleStatusLabel(t.status_label).text)}`
+              : ""
+          }</span>
         </div>
         <div class="activity-amount">
           ${t.type === "sale" ? fmt.format(t.total_amount) : `${t.quantity > 0 ? "+" : ""}${t.quantity} units`}
@@ -1178,16 +1384,19 @@ async function loadSellView() {
     if (isSeller()) {
       await refreshSellerShift();
     }
-    const [products, cups] = await Promise.all([
+    const [products, cups, tables] = await Promise.all([
       api("/api/products"),
       api("/api/cups"),
+      api("/api/tables"),
     ]);
     state.products = products;
     state.cupInventory = cups;
+    state.serviceTables = tables;
     if (!state.categories.length) {
       state.categories = await api("/api/categories");
     }
     populateProductSelects();
+    populateSellTableSelect();
     renderSellBrowse();
     syncCartWithStock();
     updateSellPreview();
@@ -1804,13 +2013,25 @@ async function completeCheckout() {
   }
 
   if (!state.paymentMethod) {
-    toast("Select a payment method: MoMo, Cash, or Visa", "error");
+    toast("Select a payment method: MoMo, Cash, Visa, or Credit", "error");
+    return;
+  }
+
+  if (!state.selectedTableId) {
+    toast("Select a table before selling.", "error");
+    document.getElementById("sell-table")?.focus();
+    return;
+  }
+
+  const notes = document.getElementById("sell-notes").value.trim();
+  if (state.paymentMethod === "credit" && !notes) {
+    toast("Add the customer name in Notes for credit sales.", "error");
+    document.getElementById("sell-notes")?.focus();
     return;
   }
 
   const btn = document.getElementById("btn-complete-sale");
   btn.disabled = true;
-  const notes = document.getElementById("sell-notes").value;
 
   try {
     const result = await api("/api/sales/checkout", {
@@ -1822,12 +2043,17 @@ async function completeCheckout() {
         })),
         notes,
         payment_method: state.paymentMethod,
+        table_id: state.selectedTableId,
       }),
     });
 
     const paymentLabel = result.payment_label || paymentMethodLabel(result.payment_method);
+    const isCredit = result.payment_method === "credit" || result.payment_status === "credit";
+    const tableName = result.table_name || "";
     toast(
-      `Payment received — ${fmt.format(result.total_amount)} · ${paymentLabel} · ${result.checkout_ref}`,
+      isCredit
+        ? `Credit recorded — ${fmt.format(result.total_amount)}${tableName ? ` · ${tableName}` : ""} · ${result.checkout_ref}`
+        : `Payment received — ${fmt.format(result.total_amount)} · ${paymentLabel}${tableName ? ` · ${tableName}` : ""} · ${result.checkout_ref}`,
       "success"
     );
 
@@ -1840,6 +2066,7 @@ async function completeCheckout() {
       created_at: new Date().toISOString(),
       payment_method: result.payment_method,
       payment_label: paymentLabel,
+      table_name: result.table_name || "",
       seller_name: state.currentUser?.display_name || state.currentUser?.username || "—",
       notes: (notes || "").trim() || null,
       total_amount: result.total_amount,
@@ -1867,6 +2094,7 @@ function invoiceFromHistoryGroup(group) {
     created_at: group.created_at,
     payment_method: group.payment_method,
     payment_label: paymentMethodLabel(group.payment_method),
+    table_name: group.table_name || "",
     seller_name: group.seller_name || state.currentUser?.display_name || "—",
     notes: group.notes || null,
     total_amount: group.total,
@@ -1904,6 +2132,10 @@ function showInvoice(invoice) {
     <div>
       <dt>Date</dt>
       <dd>${esc(when)}</dd>
+    </div>
+    <div>
+      <dt>Table</dt>
+      <dd>${esc(invoice.table_name || "—")}</dd>
     </div>
     <div>
       <dt>Seller</dt>
@@ -2551,6 +2783,7 @@ function groupShiftSalesByCheckout(sales) {
       groups.set(key, {
         created_at: sale.created_at,
         payment_method: sale.payment_method,
+        table_name: sale.table_name || "",
         items: [],
         total: 0,
       });
@@ -2589,6 +2822,7 @@ function renderShiftSalesHistory(sales) {
             <div class="shift-sale-card-head">
               <span class="shift-sale-time">${esc(formatTime(group.created_at))}</span>
               <span class="shift-sale-pay">${esc(paymentMethodLabel(group.payment_method))}</span>
+              ${group.table_name ? `<span class="shift-sale-pay">${esc(group.table_name)}</span>` : ""}
               <strong class="shift-sale-total">${fmt.format(group.total)}</strong>
             </div>
             <ul class="shift-sale-items">
@@ -3355,6 +3589,8 @@ function groupHistorySales(transactions) {
         payment_method: sale.payment_method,
         seller_name: sale.seller_name,
         user_id: sale.user_id,
+        table_id: sale.table_id,
+        table_name: sale.table_name,
         items: [],
         total: 0,
         units: 0,
@@ -3403,7 +3639,7 @@ function historyVoidAction(group) {
 function renderHistory(transactions) {
   const tbody = document.getElementById("history-table-body");
   const hideSellerCol = isSeller();
-  const colCount = hideSellerCol ? 8 : 9;
+  const colCount = hideSellerCol ? 9 : 10;
 
   if (!transactions.length) {
     tbody.innerHTML = `<tr><td colspan="${colCount}">${emptyState(UI_ICONS.clock, "No transactions", hideSellerCol ? "Your sales will appear here." : "Sales, restocks, and adjustments will appear here.")}</td></tr>`;
@@ -3423,6 +3659,7 @@ function renderHistory(transactions) {
       <td>${typeBadge("sale")}${group.is_voided ? ' <span class="badge badge-muted">Voided</span>' : ""}</td>
       <td>${fmtNum.format(group.units)}</td>
       <td>${fmt.format(group.total)}</td>
+      <td>${tableLabel(group)}</td>
       <td>${paymentMethodLabel(group.payment_method)}</td>
       ${hideSellerCol ? "" : `<td>${sellerLabel(group)}</td>`}
       <td style="color:var(--text-muted);font-size:0.82rem">${esc(group.checkout_ref || group.notes || "—")}</td>
@@ -3440,6 +3677,7 @@ function renderHistory(transactions) {
       <td>${typeBadge(t.type)}</td>
       <td>${formatTransactionQty(t)}</td>
       <td>${t.type === "sale" ? fmt.format(t.total_amount) : "—"}</td>
+      <td>${t.type === "sale" ? tableLabel(t) : "—"}</td>
       <td>${t.type === "sale" ? paymentMethodLabel(t.payment_method) : "—"}</td>
       ${hideSellerCol ? "" : `<td>${t.type === "sale" ? sellerLabel(t) : "—"}</td>`}
       <td style="color:var(--text-muted);font-size:0.82rem">${esc(t.notes || "—")}</td>
@@ -3613,6 +3851,7 @@ const PAYMENT_COLORS = {
   momo: "#d4a03c",
   card: "#5d7fa3",
   visa: "#5d7fa3",
+  credit: "#b07a4a",
   other: "#a89888",
 };
 
@@ -3901,7 +4140,7 @@ function renderSalesDetail(sales, date, from, to) {
   }
 
   if (!sales.length) {
-    const cols = isSeller() ? 5 : 6;
+    const cols = isSeller() ? 6 : 7;
     tbody.innerHTML = `<tr><td colspan="${cols}">${emptyState(UI_ICONS.sales, "No sales", "Select a date or adjust your date range.")}</td></tr>`;
     return;
   }
@@ -3916,6 +4155,7 @@ function renderSalesDetail(sales, date, from, to) {
       </td>
       <td>${s.quantity}</td>
       <td><strong>${fmt.format(s.total_amount)}</strong></td>
+      <td>${tableLabel(s)}</td>
       <td>${paymentMethodLabel(s.payment_method)}</td>
       ${isSeller() ? "" : `<td>${sellerLabel(s)}</td>`}
     </tr>`
@@ -4873,8 +5113,25 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("qty-plus").addEventListener("click", () => adjustQty(1));
   document.getElementById("add-to-cart-form").addEventListener("submit", submitAddToCart);
   initPaymentMethods();
+  initSellTableSelect();
   document.getElementById("btn-complete-sale").addEventListener("click", completeCheckout);
   document.getElementById("btn-clear-cart").addEventListener("click", clearCart);
+  document.getElementById("btn-refresh-activity")?.addEventListener("click", () => {
+    loadDashboard().catch((err) => toast(err.message, "error"));
+  });
+  document.getElementById("dashboard-activity-body")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-settle-credit]");
+    if (!btn) return;
+    openSettleCreditModal(btn.dataset.settleCredit);
+  });
+  document.querySelectorAll("#settle-payment-methods .payment-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      document.querySelectorAll("#settle-payment-methods .payment-chip").forEach((c) => c.classList.remove("active"));
+      chip.classList.add("active");
+      pendingSettleMethod = chip.dataset.method;
+    });
+  });
+  document.getElementById("settle-credit-form")?.addEventListener("submit", submitSettleCredit);
   document.getElementById("shift-start-form")?.addEventListener("submit", submitStartShift);
   document.getElementById("shift-close-form")?.addEventListener("submit", submitCloseShift);
   document.getElementById("btn-new-shift")?.addEventListener("click", () => {

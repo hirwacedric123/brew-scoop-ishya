@@ -146,6 +146,43 @@
           </div>
         </div>
 
+        <div class="card dashboard-card card-wide dashboard-activity-card" id="dashboard-activity-card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="card-title-icon card-title-icon-mint">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-4 4 4 5-6"/></svg>
+              </span>
+              <div>
+                <h3>Live sales activity</h3>
+                <p class="dashboard-activity-sub" id="dashboard-activity-sub">Recent checkouts with payment status</p>
+              </div>
+            </div>
+            <div class="dashboard-activity-meta">
+              <span class="status-pill" id="credit-outstanding-pill" hidden></span>
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-refresh-activity" title="Refresh">Refresh</button>
+            </div>
+          </div>
+          <div class="card-body card-body-flush">
+            <div class="table-wrap table-premium dashboard-activity-table-wrap">
+              <table class="data-table dashboard-activity-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Table</th>
+                    <th>Products</th>
+                    <th>Seller</th>
+                    <th>Payment</th>
+                    <th>Status</th>
+                    <th>Amount</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="dashboard-activity-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
         <div class="dashboard-stats" id="dashboard-stats"></div>
 
         <div class="dashboard-grid">
@@ -402,16 +439,24 @@
                 <strong id="cart-total">RWF 0</strong>
               </div>
               <div class="form-group">
+                <label for="sell-table">Table <span class="text-danger">*</span></label>
+                <select id="sell-table" required>
+                  <option value="">Choose a table...</option>
+                </select>
+              </div>
+              <div class="form-group">
                 <label>Payment method <span class="text-danger">*</span></label>
                 <div class="payment-methods" id="payment-methods">
                   <button type="button" class="payment-chip" data-method="momo">MoMo</button>
                   <button type="button" class="payment-chip" data-method="cash">Cash</button>
                   <button type="button" class="payment-chip" data-method="visa">Visa</button>
+                  <button type="button" class="payment-chip" data-method="credit">Credit</button>
                 </div>
               </div>
               <div class="form-group">
-                <label for="sell-notes">Notes (optional)</label>
+                <label for="sell-notes">Notes <span id="sell-notes-required" class="text-danger" hidden>*</span></label>
                 <input type="text" id="sell-notes" placeholder="Customer name, order ref...">
+                <p class="shift-field-hint" id="sell-credit-hint" hidden>Credit sales need the customer name in Notes.</p>
               </div>
               <button type="button" class="btn btn-primary btn-lg btn-block" id="btn-complete-sale">
                 Receive Payment
@@ -966,6 +1011,7 @@
                 <th>Type</th>
                 <th>Qty</th>
                 <th>Amount</th>
+                <th>Table</th>
                 <th>Payment</th>
                 <th>Seller</th>
                 <th>Notes</th>
@@ -1098,6 +1144,7 @@
                       <th>Product</th>
                       <th>Qty</th>
                       <th>Amount</th>
+                      <th>Table</th>
                       <th>Payment</th>
                       <th>Seller</th>
                     </tr>
@@ -1660,6 +1707,30 @@
           <button type="button" class="btn btn-primary" id="confirm-delete" style="background: var(--danger);">Delete</button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="settle-credit-modal" hidden>
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h3>Mark credit as paid</h3>
+        <button class="modal-close" type="button" data-close-modal>&times;</button>
+      </div>
+      <form id="settle-credit-form" style="padding: 0 1.5rem 1.5rem;">
+        <p class="text-muted" id="settle-credit-summary"></p>
+        <div class="form-group">
+          <label>Paid with <span class="text-danger">*</span></label>
+          <div class="payment-methods" id="settle-payment-methods">
+            <button type="button" class="payment-chip" data-method="cash">Cash</button>
+            <button type="button" class="payment-chip" data-method="momo">MoMo</button>
+            <button type="button" class="payment-chip" data-method="visa">Visa</button>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" data-close-modal>Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btn-settle-credit">Mark paid</button>
+        </div>
+      </form>
     </div>
   </div>
 

@@ -69,6 +69,13 @@ PAYMENT_METHODS = {
     "momo": "MoMo",
     "cash": "Cash",
     "visa": "Visa",
+    "credit": "Credit",
+}
+
+SETTLE_PAYMENT_METHODS = {
+    "momo": "MoMo",
+    "cash": "Cash",
+    "visa": "Visa",
 }
 
 DEFAULT_CATEGORIES = (
@@ -340,6 +347,50 @@ def _migrate_db(db):
         db.execute(
             "ALTER TABLE transactions ADD COLUMN voided_by INTEGER REFERENCES users(id)"
         )
+    if "payment_status" not in tx_cols:
+        db.execute("ALTER TABLE transactions ADD COLUMN payment_status TEXT")
+        db.execute(
+            """UPDATE transactions
+               SET payment_status = CASE
+                 WHEN type = 'sale' AND lower(COALESCE(payment_method, '')) = 'credit'
+                   THEN 'credit'
+                 WHEN type = 'sale' THEN 'paid'
+                 ELSE NULL
+               END
+               WHERE payment_status IS NULL"""
+        )
+    if "settled_at" not in tx_cols:
+        db.execute("ALTER TABLE transactions ADD COLUMN settled_at TEXT")
+    if "settled_method" not in tx_cols:
+        db.execute("ALTER TABLE transactions ADD COLUMN settled_method TEXT")
+    if "settled_by" not in tx_cols:
+        db.execute(
+            "ALTER TABLE transactions ADD COLUMN settled_by INTEGER REFERENCES users(id)"
+        )
+
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS service_tables (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_service_tables_sort
+            ON service_tables(sort_order, name);
+        """
+    )
+    _seed_service_tables(db)
+
+    tx_cols = {row[1] for row in db.execute("PRAGMA table_info(transactions)").fetchall()}
+    if "table_id" not in tx_cols:
+        db.execute(
+            "ALTER TABLE transactions ADD COLUMN table_id INTEGER REFERENCES service_tables(id)"
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transactions_table ON transactions(table_id)"
+        )
 
     db.executescript(
         """
@@ -358,6 +409,23 @@ def _migrate_db(db):
         CREATE INDEX IF NOT EXISTS idx_seller_sessions_user_open
             ON seller_sessions(user_id, logged_out_at);
         """
+    )
+
+
+def _seed_service_tables(db):
+    count = db.execute("SELECT COUNT(*) AS n FROM service_tables").fetchone()["n"]
+    if count > 0:
+        return
+    for i in range(1, 51):
+        db.execute(
+            """INSERT INTO service_tables (name, sort_order, is_active)
+               VALUES (?, ?, 1)""",
+            (f"Table {i}", i),
+        )
+    db.execute(
+        """INSERT INTO service_tables (name, sort_order, is_active)
+           VALUES (?, ?, 1)""",
+        ("KFC Delivery", 51),
     )
 
 
@@ -633,6 +701,24 @@ def row_to_transaction(row):
     seller_name = ""
     if "seller_name" in row.keys() and row["seller_name"]:
         seller_name = row["seller_name"]
+    keys = row.keys()
+    payment_method = (row["payment_method"] or "").strip().lower()
+    payment_status = None
+    if "payment_status" in keys and row["payment_status"]:
+        payment_status = row["payment_status"]
+    elif row["type"] == "sale":
+        payment_status = "credit" if payment_method == "credit" else "paid"
+    voided = bool(row["voided_at"] if "voided_at" in keys else None)
+    if voided:
+        status_label = "voided"
+    elif payment_status == "credit":
+        status_label = "credit"
+    elif payment_status == "paid" and payment_method == "credit":
+        status_label = "paid"
+    elif payment_status == "paid":
+        status_label = "paid"
+    else:
+        status_label = payment_status or "—"
     return {
         "id": row["id"],
         "product_id": row["product_id"],
@@ -645,12 +731,22 @@ def row_to_transaction(row):
         "notes": row["notes"] or "",
         "checkout_ref": row["checkout_ref"] or "",
         "payment_method": row["payment_method"] or "",
+        "payment_status": payment_status,
+        "status_label": status_label,
+        "settled_at": row["settled_at"] if "settled_at" in keys else None,
+        "settled_method": row["settled_method"] if "settled_method" in keys else None,
         "user_id": row["user_id"] if row["user_id"] else None,
         "seller_name": seller_name,
+        "table_id": row["table_id"] if "table_id" in keys and row["table_id"] else None,
+        "table_name": (
+            row["table_name"]
+            if "table_name" in keys and row["table_name"]
+            else None
+        ),
         "created_at": row["created_at"],
         "sale_date": row["created_at"][:10],
-        "voided_at": row["voided_at"] if "voided_at" in row.keys() else None,
-        "is_voided": bool(row["voided_at"] if "voided_at" in row.keys() else None),
+        "voided_at": row["voided_at"] if "voided_at" in keys else None,
+        "is_voided": voided,
     }
 
 
@@ -1505,16 +1601,34 @@ def _normalize_checkout_items(raw_items):
     return [{"product_id": pid, "quantity": qty} for pid, qty in merged.items()], None
 
 
-def _execute_checkout(db, items, notes=None, payment_method=None, user_id=None, shift_id=None):
+def _execute_checkout(
+    db, items, notes=None, payment_method=None, user_id=None, shift_id=None, table_id=None
+):
     method = (payment_method or "").strip().lower()
     if method not in PAYMENT_METHODS:
-        return None, "Select a payment method: MoMo, Cash, or Visa", 400
+        return None, "Select a payment method: MoMo, Cash, Visa, or Credit", 400
+
+    try:
+        table_id = int(table_id)
+    except (TypeError, ValueError):
+        return None, "Select a table before selling.", 400
+
+    table_row = db.execute(
+        "SELECT id, name FROM service_tables WHERE id = ? AND is_active = 1",
+        (table_id,),
+    ).fetchone()
+    if not table_row:
+        return None, "Selected table was not found.", 400
+
+    notes_text = (notes or "").strip() or None
+    if method == "credit" and not notes_text:
+        return None, "Add the customer name in Notes for credit sales.", 400
 
     checkout_ref = (
         f"CHK-{now_kigali().strftime('%Y%m%d%H%M%S')}-{secrets.token_hex(3).upper()}"
     )
     ts = now_iso()
-    notes_text = (notes or "").strip() or None
+    payment_status = "credit" if method == "credit" else "paid"
     category_cup_map = get_category_cup_map(db)
     cup_inv = get_cup_inventory(db)
 
@@ -1578,8 +1692,9 @@ def _execute_checkout(db, items, notes=None, payment_method=None, user_id=None, 
             cur = db.execute(
                 """INSERT INTO transactions
                    (product_id, type, quantity, unit_price, total_amount,
-                    notes, created_at, checkout_ref, payment_method, user_id, shift_id)
-                   VALUES (?, 'sale', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    notes, created_at, checkout_ref, payment_method, payment_status,
+                    user_id, shift_id, table_id)
+                   VALUES (?, 'sale', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     product_id,
                     quantity,
@@ -1589,8 +1704,10 @@ def _execute_checkout(db, items, notes=None, payment_method=None, user_id=None, 
                     ts,
                     checkout_ref,
                     method,
+                    payment_status,
                     user_id,
                     shift_id,
+                    table_id,
                 ),
             )
 
@@ -1629,6 +1746,9 @@ def _execute_checkout(db, items, notes=None, payment_method=None, user_id=None, 
             "checkout_ref": checkout_ref,
             "payment_method": method,
             "payment_label": PAYMENT_METHODS[method],
+            "payment_status": payment_status,
+            "table_id": table_id,
+            "table_name": table_row["name"],
             "items": result_items,
             "total_amount": round(total_amount, 2),
             "total_units": total_units,
@@ -1638,6 +1758,21 @@ def _execute_checkout(db, items, notes=None, payment_method=None, user_id=None, 
     except Exception:
         db.rollback()
         raise
+
+
+@app.route("/api/tables", methods=["GET"])
+@login_required
+def list_service_tables():
+    rows = get_db().execute(
+        """SELECT id, name, sort_order
+           FROM service_tables
+           WHERE is_active = 1
+           ORDER BY sort_order ASC, name COLLATE NOCASE ASC"""
+    ).fetchall()
+    return jsonify([
+        {"id": r["id"], "name": r["name"], "sort_order": r["sort_order"]}
+        for r in rows
+    ])
 
 
 @app.route("/api/sales", methods=["POST"])
@@ -1669,7 +1804,13 @@ def create_sale():
             return jsonify({"error": "Start or join a shift before selling."}), 400
         shift_id = shift["id"]
     result, error, status = _execute_checkout(
-        db, items, data.get("notes"), data.get("payment_method"), user["id"], shift_id
+        db,
+        items,
+        data.get("notes"),
+        data.get("payment_method"),
+        user["id"],
+        shift_id,
+        data.get("table_id"),
     )
     if error:
         return jsonify({"error": error}), status
@@ -1685,6 +1826,8 @@ def create_sale():
         "remaining_stock": item["remaining_stock"],
         "payment_method": result.get("payment_method"),
         "payment_label": result.get("payment_label"),
+        "table_id": result.get("table_id"),
+        "table_name": result.get("table_name"),
     }), status
 
 
@@ -1705,11 +1848,146 @@ def checkout_sale():
             return jsonify({"error": "Start or join a shift before selling."}), 400
         shift_id = shift["id"]
     result, error, status = _execute_checkout(
-        db, items, data.get("notes"), data.get("payment_method"), user["id"], shift_id
+        db,
+        items,
+        data.get("notes"),
+        data.get("payment_method"),
+        user["id"],
+        shift_id,
+        data.get("table_id"),
     )
     if error:
         return jsonify({"error": error}), status
     return jsonify(result), status
+
+
+def _sale_activity_rows(db, limit=40):
+    rows = db.execute(
+        """SELECT t.*, p.name AS product_name, p.category,
+                  u.display_name AS seller_name,
+                  st.name AS table_name
+           FROM transactions t
+           JOIN products p ON p.id = t.product_id
+           LEFT JOIN users u ON u.id = t.user_id
+           LEFT JOIN service_tables st ON st.id = t.table_id
+           WHERE t.type = 'sale'
+           ORDER BY t.created_at DESC, t.id DESC
+           LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [row_to_transaction(r) for r in rows]
+
+
+def _group_sale_activity(transactions):
+    groups = []
+    by_ref = {}
+    for tx in transactions:
+        key = tx["checkout_ref"] or f"line-{tx['id']}"
+        if key not in by_ref:
+            group = {
+                "checkout_ref": tx["checkout_ref"] or "",
+                "created_at": tx["created_at"],
+                "seller_name": tx["seller_name"] or "—",
+                "payment_method": tx["payment_method"],
+                "payment_status": tx["payment_status"],
+                "status_label": tx["status_label"],
+                "settled_at": tx.get("settled_at"),
+                "settled_method": tx.get("settled_method"),
+                "notes": tx["notes"] or "",
+                "table_id": tx.get("table_id"),
+                "table_name": tx.get("table_name") or "—",
+                "is_voided": tx["is_voided"],
+                "items": [],
+                "total_amount": 0.0,
+                "total_units": 0,
+            }
+            by_ref[key] = group
+            groups.append(group)
+        group = by_ref[key]
+        group["items"].append({
+            "product_name": tx["product_name"],
+            "quantity": tx["quantity"],
+            "total_amount": tx["total_amount"],
+        })
+        group["total_amount"] = round(group["total_amount"] + tx["total_amount"], 2)
+        group["total_units"] += tx["quantity"]
+        # Prefer credit/voided status if mixed (shouldn't happen)
+        if tx["is_voided"]:
+            group["is_voided"] = True
+            group["status_label"] = "voided"
+        elif group["status_label"] != "voided" and tx["status_label"] == "credit":
+            group["status_label"] = "credit"
+            group["payment_status"] = "credit"
+    return groups
+
+
+@app.route("/api/sales/settle-credit", methods=["POST"])
+@role_required("admin", "supervisor", "stock_manager", "seller")
+def settle_credit_sale():
+    data = request.get_json(silent=True) or {}
+    checkout_ref = (data.get("checkout_ref") or "").strip()
+    method = (data.get("payment_method") or "").strip().lower()
+
+    if not checkout_ref:
+        return jsonify({"error": "Sale reference is required"}), 400
+    if method not in SETTLE_PAYMENT_METHODS:
+        return jsonify({"error": "Select how it was paid: MoMo, Cash, or Visa"}), 400
+
+    db = get_db()
+    user = get_current_user(db)
+    rows = db.execute(
+        """SELECT * FROM transactions
+           WHERE type = 'sale' AND checkout_ref = ? AND voided_at IS NULL""",
+        (checkout_ref,),
+    ).fetchall()
+    if not rows:
+        return jsonify({"error": "Sale not found"}), 404
+
+    if any((r["payment_method"] or "").lower() != "credit" for r in rows):
+        return jsonify({"error": "Only credit sales can be marked as paid here"}), 400
+
+    status_values = []
+    for r in rows:
+        keys = r.keys()
+        if "payment_status" in keys and r["payment_status"]:
+            status_values.append(r["payment_status"])
+        else:
+            status_values.append("credit")
+    if all(s == "paid" for s in status_values):
+        return jsonify({"error": "This credit sale is already marked as paid"}), 409
+    if any(s != "credit" for s in status_values):
+        return jsonify({"error": "This sale cannot be settled"}), 400
+
+    ts = now_iso()
+    db.execute(
+        """UPDATE transactions
+           SET payment_status = 'paid',
+               settled_at = ?,
+               settled_method = ?,
+               settled_by = ?
+           WHERE type = 'sale' AND checkout_ref = ? AND voided_at IS NULL""",
+        (ts, method, user["id"], checkout_ref),
+    )
+    db.commit()
+
+    updated = db.execute(
+        """SELECT t.*, p.name AS product_name, p.category,
+                  u.display_name AS seller_name,
+                  st.name AS table_name
+           FROM transactions t
+           JOIN products p ON p.id = t.product_id
+           LEFT JOIN users u ON u.id = t.user_id
+           LEFT JOIN service_tables st ON st.id = t.table_id
+           WHERE t.type = 'sale' AND t.checkout_ref = ?
+           ORDER BY t.id ASC""",
+        (checkout_ref,),
+    ).fetchall()
+    txs = [row_to_transaction(r) for r in updated]
+    groups = _group_sale_activity(txs)
+    return jsonify({
+        "message": f"Credit marked as paid via {SETTLE_PAYMENT_METHODS[method]}.",
+        "sale": groups[0] if groups else None,
+    })
 
 
 def _execute_void_sale(db, checkout_ref, voided_by_user_id):
@@ -2018,9 +2296,11 @@ def _seller_sales_for_shift(db, shift_id):
 
 def _shift_sales_for_response(db, shift_id):
     rows = db.execute(
-        """SELECT t.*, p.name AS product_name, p.category
+        """SELECT t.*, p.name AS product_name, p.category,
+                  st.name AS table_name
            FROM transactions t
            JOIN products p ON p.id = t.product_id
+           LEFT JOIN service_tables st ON st.id = t.table_id
            WHERE t.type = 'sale' AND t.shift_id = ?
            ORDER BY t.created_at DESC, t.id DESC""",
         (shift_id,),
@@ -2618,10 +2898,12 @@ def list_transactions():
 
     query = """
         SELECT t.*, p.name AS product_name, p.category,
-               u.display_name AS seller_name
+               u.display_name AS seller_name,
+               st.name AS table_name
         FROM transactions t
         JOIN products p ON p.id = t.product_id
         LEFT JOIN users u ON u.id = t.user_id
+        LEFT JOIN service_tables st ON st.id = t.table_id
         WHERE 1=1
     """
     params = []
@@ -2718,10 +3000,12 @@ def sales_report():
     user_clause, user_params = _sale_user_clause(user_id, "t")
     sales_rows = db.execute(
         f"""SELECT t.*, p.name AS product_name, p.category,
-                   u.display_name AS seller_name
+                   u.display_name AS seller_name,
+                   st.name AS table_name
            FROM transactions t
            JOIN products p ON p.id = t.product_id
            LEFT JOIN users u ON u.id = t.user_id
+           LEFT JOIN service_tables st ON st.id = t.table_id
            WHERE t.type = 'sale'{_not_voided_clause("t")}
              AND substr(t.created_at, 1, 10) >= ?
              AND substr(t.created_at, 1, 10) <= ?{user_clause}
@@ -3105,12 +3389,26 @@ def dashboard_stats():
 
     recent = db.execute(
         """SELECT t.*, p.name AS product_name, p.category,
-                  u.display_name AS seller_name
+                  u.display_name AS seller_name,
+                  st.name AS table_name
            FROM transactions t
            JOIN products p ON p.id = t.product_id
            LEFT JOIN users u ON u.id = t.user_id
+           LEFT JOIN service_tables st ON st.id = t.table_id
            ORDER BY t.created_at DESC LIMIT 8"""
     ).fetchall()
+
+    sale_activity = _group_sale_activity(_sale_activity_rows(db, limit=60))
+    credit_open = db.execute(
+        f"""SELECT COALESCE(SUM(total_amount), 0) AS amount,
+                  COUNT(DISTINCT checkout_ref) AS sales
+           FROM transactions
+           WHERE type = 'sale'{_not_voided_clause()}
+             AND (
+               payment_status = 'credit'
+               OR (payment_status IS NULL AND lower(COALESCE(payment_method, '')) = 'credit')
+             )"""
+    ).fetchone()
 
     return jsonify({
         "total_products": total_products,
@@ -3136,6 +3434,9 @@ def dashboard_stats():
         "today_date": today,
         "total_revenue": round(sales_all["revenue"], 2),
         "total_sales_count": sales_all["count"],
+        "credit_outstanding": round(credit_open["amount"], 2),
+        "credit_open_sales": credit_open["sales"],
+        "sale_activity": sale_activity[:25],
         "categories": [
             {
                 "name": c["category"],

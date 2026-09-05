@@ -871,6 +871,10 @@
   transform: translateY(-1px);
 }
 
+.payment-chip[data-method="credit"].active {
+  background: linear-gradient(135deg, #b07a4a 0%, #8a5528 100%);
+}
+
 .payment-chip:focus-visible {
   outline: 2px solid var(--caramel);
   outline-offset: 2px;
