@@ -21,6 +21,7 @@ from auth import (
     get_user_by_id,
     get_user_by_pin,
     get_user_by_username,
+    get_users_by_pin,
     hash_password,
     init_users_table,
     login_required,
@@ -280,9 +281,19 @@ def _migrate_db(db):
     user_cols = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
     if "pin" not in user_cols:
         db.execute("ALTER TABLE users ADD COLUMN pin TEXT")
+    if "must_change_pin" not in user_cols:
+        db.execute(
+            "ALTER TABLE users ADD COLUMN must_change_pin INTEGER NOT NULL DEFAULT 0"
+        )
+    if "can_supervise_shift" not in user_cols:
+        db.execute(
+            "ALTER TABLE users ADD COLUMN can_supervise_shift INTEGER NOT NULL DEFAULT 0"
+        )
+    # Permanent PINs stay unique; temporary starter PINs (must_change_pin=1) may be shared.
+    db.execute("DROP INDEX IF EXISTS idx_users_pin")
     db.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_pin ON users(pin) "
-        "WHERE pin IS NOT NULL AND pin != ''"
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_pin_permanent ON users(pin) "
+        "WHERE pin IS NOT NULL AND pin != '' AND IFNULL(must_change_pin, 0) = 0"
     )
 
     init_password_reset_table(db)
@@ -919,9 +930,32 @@ def auth_login():
         return jsonify({"error": error}), 400
 
     db = get_db()
-    row = get_user_by_pin(db, pin)
-    if not row:
+    matches = get_users_by_pin(db, pin)
+    if not matches:
         return jsonify({"error": "Invalid PIN"}), 401
+
+    selected_id = data.get("user_id")
+    if selected_id is not None:
+        try:
+            selected_id = int(selected_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid account selection"}), 400
+        row = next((r for r in matches if r["id"] == selected_id), None)
+        if not row:
+            return jsonify({"error": "Invalid PIN"}), 401
+    elif len(matches) > 1:
+        return jsonify({
+            "need_account_pick": True,
+            "candidates": [
+                {
+                    "id": r["id"],
+                    "display_name": r["display_name"],
+                }
+                for r in matches
+            ],
+        })
+    else:
+        row = matches[0]
 
     login_user(row["id"])
     _start_seller_session(db, row["id"])
@@ -930,6 +964,7 @@ def auth_login():
         {
             "user": user_data,
             "must_change_password": user_data.get("must_change_password", False),
+            "must_change_pin": user_data.get("must_change_pin", False),
         }
     )
 
@@ -1122,13 +1157,24 @@ def auth_set_pin():
     if pin_taken(db, pin, exclude_user_id=user["id"]):
         return jsonify({"error": "That PIN is already used by another account"}), 409
 
+    must_change = False
+    if "must_change_pin" in user.keys():
+        must_change = bool(user["must_change_pin"])
+
     db.execute(
-        "UPDATE users SET pin=?, updated_at=? WHERE id=?",
+        """UPDATE users
+           SET pin=?, must_change_pin=0, updated_at=?
+           WHERE id=?""",
         (pin, now_iso(), user["id"]),
     )
     db.commit()
     updated = get_user_by_id(db, user["id"])
-    return jsonify({"message": "PIN saved", "user": public_user(updated)})
+    message = (
+        "Personal PIN saved. Use it to sign in next time."
+        if must_change
+        else "PIN saved"
+    )
+    return jsonify({"message": message, "user": public_user(updated)})
 
 
 # ── Admin API ──────────────────────────────────────────────────────────────
@@ -2443,6 +2489,19 @@ def _shift_close_message(row):
     return " ".join(parts)
 
 
+def _user_can_supervise_shift(user_row):
+    if user_row is None:
+        return False
+    keys = user_row.keys()
+    if "can_supervise_shift" in keys:
+        return bool(user_row["can_supervise_shift"])
+    return False
+
+
+def _shift_role_for_user(user_row):
+    return "supervisor" if _user_can_supervise_shift(user_row) else "member"
+
+
 @app.route("/api/seller/shift", methods=["GET"])
 @role_required("seller")
 def seller_shift_status():
@@ -2484,9 +2543,10 @@ def seller_shift_start():
 
     ts = now_iso()
     store_shift = get_open_store_shift(db)
+    my_role = _shift_role_for_user(user)
 
     if store_shift:
-        # Join the live shift as a regular seller; first entrant stays supervisor.
+        # Join the live store shift. Floor supervisors can close; others only sell.
         existing = db.execute(
             """SELECT * FROM shift_members
                WHERE shift_id = ? AND user_id = ?""",
@@ -2497,26 +2557,33 @@ def seller_shift_start():
         if existing:
             db.execute(
                 """UPDATE shift_members
-                   SET left_at = NULL, joined_at = ?, role_on_shift = 'member'
+                   SET left_at = NULL, joined_at = ?, role_on_shift = ?
                    WHERE id = ?""",
-                (ts, existing["id"]),
+                (ts, my_role, existing["id"]),
             )
         else:
-            _add_shift_member(db, store_shift["id"], user["id"], "member", ts)
+            _add_shift_member(db, store_shift["id"], user["id"], my_role, ts)
         db.commit()
         row = db.execute(
             "SELECT * FROM seller_shifts WHERE id = ?",
             (store_shift["id"],),
         ).fetchone()
         shift_data = _shift_payload_for_user(db, row, user["id"])
-        supervisor = shift_data.get("supervisor_name") or "the supervisor"
+        if my_role == "supervisor":
+            message = "Joined the open shift as supervisor. You can sell and close & reconcile."
+        else:
+            lead = shift_data.get("supervisor_name")
+            message = (
+                f"Joined the open shift{f' with {lead}' if lead else ''}. "
+                "You can sell — a floor supervisor will close & reconcile."
+            )
         return jsonify({
             "has_open_shift": True,
-            "can_close": False,
-            "my_role_on_shift": "member",
+            "can_close": shift_data["can_close"],
+            "my_role_on_shift": my_role,
             "joined": True,
             "shift": shift_data,
-            "message": f"Joined the open shift led by {supervisor}. You can sell now.",
+            "message": message,
         }), 201
 
     cur = db.execute(
@@ -2526,20 +2593,28 @@ def seller_shift_start():
         (user["id"], ts),
     )
     shift_id = cur.lastrowid
-    _add_shift_member(db, shift_id, user["id"], "supervisor", ts)
+    _add_shift_member(db, shift_id, user["id"], my_role, ts)
     db.commit()
     row = db.execute(
         "SELECT * FROM seller_shifts WHERE id = ?",
         (shift_id,),
     ).fetchone()
     shift_data = _shift_payload_for_user(db, row, user["id"])
+    if my_role == "supervisor":
+        message = (
+            "Shift started. You are a floor supervisor and can close & reconcile when done."
+        )
+    else:
+        message = (
+            "Shift started. You can sell now — a floor supervisor must close & reconcile."
+        )
     return jsonify({
         "has_open_shift": True,
-        "can_close": True,
-        "my_role_on_shift": "supervisor",
+        "can_close": shift_data["can_close"],
+        "my_role_on_shift": my_role,
         "joined": False,
         "shift": shift_data,
-        "message": "Shift started. You are the shift supervisor and can close & reconcile when done.",
+        "message": message,
     }), 201
 
 
@@ -2604,16 +2679,9 @@ def seller_shift_close():
 
     membership = get_shift_membership(db, shift["id"], user["id"])
     if not membership or membership["role_on_shift"] != "supervisor":
-        supervisor_name = None
-        members = _list_shift_members(db, shift["id"])
-        for member in members:
-            if member["role_on_shift"] == "supervisor" and member["active"]:
-                supervisor_name = member["display_name"]
-                break
-        led_by = f" led by {supervisor_name}" if supervisor_name else ""
         return jsonify({
             "error": (
-                f"Only the shift supervisor{led_by} can close and reconcile. "
+                "Only a floor supervisor can close and reconcile. "
                 "Keep selling — they will balance the till."
             )
         }), 403

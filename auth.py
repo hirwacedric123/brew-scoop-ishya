@@ -47,6 +47,12 @@ def row_to_user(row):
         "must_change_password": bool(row["must_change_password"])
         if "must_change_password" in keys
         else False,
+        "must_change_pin": bool(row["must_change_pin"])
+        if "must_change_pin" in keys
+        else False,
+        "can_supervise_shift": bool(row["can_supervise_shift"])
+        if "can_supervise_shift" in keys
+        else False,
         "has_pin": bool(pin_value),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -72,13 +78,20 @@ def get_user_by_username(db, username):
 
 
 def get_user_by_pin(db, pin):
+    rows = get_users_by_pin(db, pin)
+    return rows[0] if len(rows) == 1 else None
+
+
+def get_users_by_pin(db, pin):
     pin = (pin or "").strip()
     if not pin:
-        return None
+        return []
     return db.execute(
-        "SELECT * FROM users WHERE pin = ? AND is_active = 1",
+        """SELECT * FROM users
+           WHERE pin = ? AND is_active = 1
+           ORDER BY display_name COLLATE NOCASE ASC""",
         (pin,),
-    ).fetchone()
+    ).fetchall()
 
 
 PIN_MIN_LEN = 4
@@ -99,7 +112,10 @@ def validate_pin(value, *, required=True):
 
 
 def pin_taken(db, pin, exclude_user_id=None):
-    query = "SELECT id FROM users WHERE pin = ?"
+    """Permanent PINs must be unique. Temporary shared starter PINs are allowed."""
+    query = """SELECT id FROM users
+               WHERE pin = ?
+                 AND IFNULL(must_change_pin, 0) = 0"""
     params = [pin]
     if exclude_user_id is not None:
         query += " AND id != ?"
@@ -196,6 +212,21 @@ def password_change_exempt():
     return False
 
 
+def pin_change_exempt():
+    path = request.path
+    if path in ("/", "/login"):
+        return True
+    for prefix in (
+        "/api/auth/pin",
+        "/api/auth/logout",
+        "/api/auth/me",
+        "/static/",
+    ):
+        if path == prefix or path.startswith(prefix):
+            return True
+    return False
+
+
 def _password_change_block_response():
     if request.path.startswith("/api/"):
         return (
@@ -210,9 +241,29 @@ def _password_change_block_response():
     return redirect(url_for("change_password"))
 
 
+def _pin_change_block_response():
+    if request.path.startswith("/api/"):
+        return (
+            jsonify(
+                {
+                    "error": "You must set a new personal PIN before continuing",
+                    "must_change_pin": True,
+                }
+            ),
+            403,
+        )
+    return redirect(url_for("index"))
+
+
 def _block_if_password_change_required(user):
     if user and row_to_user(user)["must_change_password"] and not password_change_exempt():
         return _password_change_block_response()
+    return None
+
+
+def _block_if_pin_change_required(user):
+    if user and row_to_user(user)["must_change_pin"] and not pin_change_exempt():
+        return _pin_change_block_response()
     return None
 
 
@@ -229,6 +280,9 @@ def login_required(view):
         blocked = _block_if_password_change_required(user)
         if blocked is not None:
             return blocked
+        blocked = _block_if_pin_change_required(user)
+        if blocked is not None:
+            return blocked
         return view(*args, **kwargs)
 
     return wrapped
@@ -243,6 +297,9 @@ def admin_required(view):
         if user is None:
             return jsonify({"error": "Authentication required"}), 401
         blocked = _block_if_password_change_required(user)
+        if blocked is not None:
+            return blocked
+        blocked = _block_if_pin_change_required(user)
         if blocked is not None:
             return blocked
         if user["role"] != "admin":
@@ -266,6 +323,9 @@ def role_required(*roles):
                     return jsonify({"error": "Authentication required"}), 401
                 return redirect(url_for("login", next=request.path))
             blocked = _block_if_password_change_required(user)
+            if blocked is not None:
+                return blocked
+            blocked = _block_if_pin_change_required(user)
             if blocked is not None:
                 return blocked
             if user["role"] not in allowed:

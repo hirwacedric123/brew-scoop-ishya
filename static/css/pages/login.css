@@ -191,6 +191,26 @@
   border-top: 1px solid var(--border-subtle);
 }
 
+.login-account-pick {
+  padding: 0.25rem 0 0.5rem;
+}
+
+.login-account-pick .login-subtitle {
+  margin: 0.35rem 0 1rem;
+  font-size: 0.88rem;
+}
+
+.login-account-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-bottom: 0.85rem;
+}
+
+.login-account-btn {
+  justify-content: center;
+}
+
 .btn-login-alt {
   width: 100%;
   background: linear-gradient(180deg, #5d4037 0%, #3d2618 100%);
