@@ -3,7 +3,7 @@
 
 For PythonAnywhere (Bash console):
 
-  cd ~/brew-scoop-main
+  cd ~/brew-scoop
   python3.10 scripts/reset_admin_password.py
 
   # or with username:

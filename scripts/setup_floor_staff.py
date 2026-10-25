@@ -3,7 +3,7 @@
 
 For PythonAnywhere (Bash console):
 
-  cd ~/brew-scoop-main
+  cd ~/brew-scoop
   python3.10 scripts/setup_floor_staff.py
 
 What it does:
