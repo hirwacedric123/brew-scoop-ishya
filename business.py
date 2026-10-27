@@ -97,6 +97,38 @@ def list_user_memberships(db, user_id, active_only=True):
     ]
 
 
+def list_active_businesses(db):
+    rows = db.execute(
+        """SELECT id, name, slug, is_active
+           FROM businesses
+           WHERE is_active = 1
+           ORDER BY name COLLATE NOCASE ASC"""
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "slug": row["slug"],
+            "role": "admin",
+            "is_active": True,
+        }
+        for row in rows
+    ]
+
+
+def list_switchable_businesses(db, user_id, is_platform_admin=False):
+    """Businesses the user can enter from the dashboard switcher."""
+    memberships = list_user_memberships(db, user_id, active_only=True)
+    if not is_platform_admin:
+        return memberships
+    by_id = {m["id"]: m for m in memberships}
+    merged = []
+    for biz in list_active_businesses(db):
+        existing = by_id.get(biz["id"])
+        merged.append(existing or biz)
+    return merged
+
+
 def upsert_membership(db, user_id, business_id, role, is_active=True, created_at=None):
     if role not in ROLES:
         raise ValueError(f"Invalid role: {role}")
