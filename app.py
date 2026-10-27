@@ -118,6 +118,7 @@ def init_db():
             name TEXT NOT NULL,
             category TEXT NOT NULL,
             price REAL NOT NULL CHECK(price >= 0),
+            cost_price REAL NOT NULL DEFAULT 0 CHECK(cost_price >= 0),
             quantity INTEGER NOT NULL DEFAULT 0 CHECK(quantity >= 0),
             reorder_level INTEGER NOT NULL DEFAULT 10 CHECK(reorder_level >= 0),
             sku TEXT,
@@ -132,6 +133,7 @@ def init_db():
             type TEXT NOT NULL CHECK(type IN ('sale', 'restock', 'adjustment')),
             quantity INTEGER NOT NULL,
             unit_price REAL NOT NULL,
+            cost_price REAL,
             total_amount REAL NOT NULL,
             notes TEXT,
             created_at TEXT NOT NULL,
@@ -422,6 +424,18 @@ def _migrate_db(db):
         """
     )
 
+    product_cols = {
+        row[1] for row in db.execute("PRAGMA table_info(products)").fetchall()
+    }
+    if "cost_price" not in product_cols:
+        db.execute(
+            "ALTER TABLE products ADD COLUMN cost_price REAL NOT NULL DEFAULT 0"
+        )
+
+    tx_cols = {row[1] for row in db.execute("PRAGMA table_info(transactions)").fetchall()}
+    if "cost_price" not in tx_cols:
+        db.execute("ALTER TABLE transactions ADD COLUMN cost_price REAL")
+
 
 def _seed_service_tables(db):
     count = db.execute("SELECT COUNT(*) AS n FROM service_tables").fetchone()["n"]
@@ -656,7 +670,46 @@ def month_range_kigali():
     return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
 
 
-def row_to_product(row, category_cup_map=None, cup_inventory=None):
+COST_VIEW_ROLES = ("admin", "stock_manager", "supervisor")
+COST_EDIT_ROLES = ("admin", "stock_manager")
+
+
+def _product_cost_value(row):
+    keys = row.keys()
+    if "cost_price" not in keys or row["cost_price"] is None:
+        return 0.0
+    return float(row["cost_price"])
+
+
+def _margin_from_prices(sell_price, cost_price):
+    sell = float(sell_price or 0)
+    cost = float(cost_price or 0)
+    margin = round(sell - cost, 2)
+    margin_pct = round((margin / sell) * 100, 1) if sell > 0 else None
+    return margin, margin_pct
+
+
+def _profit_metrics(revenue, cogs):
+    revenue = float(revenue or 0)
+    cogs = float(cogs or 0)
+    gross_profit = round(revenue - cogs, 2)
+    gross_margin_pct = (
+        round((gross_profit / revenue) * 100, 1) if revenue > 0 else None
+    )
+    return {
+        "cogs": round(cogs, 2),
+        "gross_profit": gross_profit,
+        "gross_margin_pct": gross_margin_pct,
+    }
+
+
+def _can_view_cost(user=None):
+    if user is None:
+        user = get_current_user(get_db())
+    return user is not None and user["role"] in COST_VIEW_ROLES
+
+
+def row_to_product(row, category_cup_map=None, cup_inventory=None, include_cost=None):
     uses_cups = (
         category_cup_map.get(row["category"], False)
         if category_cup_map is not None
@@ -669,7 +722,7 @@ def row_to_product(row, category_cup_map=None, cup_inventory=None):
         effective_qty = row["quantity"]
         reorder = row["reorder_level"]
 
-    return {
+    data = {
         "id": row["id"],
         "name": row["name"],
         "category": row["category"],
@@ -682,6 +735,15 @@ def row_to_product(row, category_cup_map=None, cup_inventory=None):
         "updated_at": row["updated_at"],
         "stock_status": _stock_status(effective_qty, reorder),
     }
+    if include_cost is None:
+        include_cost = _can_view_cost()
+    if include_cost:
+        cost_price = round(_product_cost_value(row), 2)
+        margin, margin_pct = _margin_from_prices(data["price"], cost_price)
+        data["cost_price"] = cost_price
+        data["margin"] = margin
+        data["margin_pct"] = margin_pct
+    return data
 
 
 def _products_response(db, rows, low_only=False):
@@ -730,7 +792,7 @@ def row_to_transaction(row):
         status_label = "paid"
     else:
         status_label = payment_status or "—"
-    return {
+    data = {
         "id": row["id"],
         "product_id": row["product_id"],
         "product_name": row["product_name"],
@@ -759,6 +821,18 @@ def row_to_transaction(row):
         "voided_at": row["voided_at"] if "voided_at" in keys else None,
         "is_voided": voided,
     }
+    if _can_view_cost():
+        cost_price = 0.0
+        if "cost_price" in keys and row["cost_price"] is not None:
+            cost_price = float(row["cost_price"])
+        cost_price = round(cost_price, 2)
+        margin, margin_pct = _margin_from_prices(data["unit_price"], cost_price)
+        data["cost_price"] = cost_price
+        data["margin"] = margin
+        data["margin_pct"] = margin_pct
+        data["line_cost"] = round(cost_price * data["quantity"], 2)
+        data["line_profit"] = round(data["total_amount"] - data["line_cost"], 2)
+    return data
 
 
 def _parse_user_id_filter(user_id):
@@ -1488,15 +1562,17 @@ def create_product():
 
     uses_cups = category_uses_cups(db, category)
     quantity = 0 if uses_cups else int(data.get("quantity", 0))
+    cost_price = float(data.get("cost_price", 0) or 0)
 
     cur = db.execute(
         """INSERT INTO products
-           (name, category, price, quantity, reorder_level, sku, description, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (name, category, price, cost_price, quantity, reorder_level, sku, description, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             data["name"].strip(),
             category,
             float(data["price"]),
+            cost_price,
             quantity,
             int(data.get("reorder_level", 10)),
             None,
@@ -1508,10 +1584,17 @@ def create_product():
     if quantity > 0:
         db.execute(
             """INSERT INTO transactions
-               (product_id, type, quantity, unit_price, total_amount, notes, created_at)
-               VALUES (?, 'restock', ?, ?, ?, ?, ?)""",
-            (cur.lastrowid, quantity, float(data["price"]),
-             float(data["price"]) * quantity, "Initial stock", ts),
+               (product_id, type, quantity, unit_price, cost_price, total_amount, notes, created_at)
+               VALUES (?, 'restock', ?, ?, ?, ?, ?, ?)""",
+            (
+                cur.lastrowid,
+                quantity,
+                cost_price,
+                cost_price,
+                round(cost_price * quantity, 2),
+                "Initial stock",
+                ts,
+            ),
         )
     db.commit()
     row = db.execute("SELECT * FROM products WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -1547,14 +1630,19 @@ def update_product(product_id):
 
     ts = now_iso()
     old_quantity = row["quantity"]
+    if "cost_price" in data and data.get("cost_price") is not None:
+        cost_price = float(data.get("cost_price", 0) or 0)
+    else:
+        cost_price = _product_cost_value(row)
     db.execute(
         """UPDATE products SET
-           name=?, category=?, price=?, quantity=?, reorder_level=?, sku=?, description=?, updated_at=?
+           name=?, category=?, price=?, cost_price=?, quantity=?, reorder_level=?, sku=?, description=?, updated_at=?
            WHERE id=?""",
         (
             data["name"].strip(),
             category,
             float(data["price"]),
+            cost_price,
             new_quantity,
             int(data.get("reorder_level", row["reorder_level"])),
             None,
@@ -1607,6 +1695,13 @@ def _validate_product(data, partial=False):
             return "Price must be zero or positive"
     except (TypeError, ValueError):
         return "Invalid price"
+    if "cost_price" in data and data.get("cost_price") is not None:
+        try:
+            cost_price = float(data.get("cost_price", -1))
+            if cost_price < 0:
+                return "Purchase price must be zero or positive"
+        except (TypeError, ValueError):
+            return "Invalid purchase price"
     if "quantity" in data:
         try:
             if int(data["quantity"]) < 0:
@@ -1722,6 +1817,7 @@ def _execute_checkout(
             quantity = item["quantity"]
             row = products[product_id]
             unit_price = float(row["price"])
+            cost_price = _product_cost_value(row)
             line_total = round(unit_price * quantity, 2)
             uses_cups = category_cup_map.get(row["category"], False)
 
@@ -1737,14 +1833,15 @@ def _execute_checkout(
 
             cur = db.execute(
                 """INSERT INTO transactions
-                   (product_id, type, quantity, unit_price, total_amount,
+                   (product_id, type, quantity, unit_price, cost_price, total_amount,
                     notes, created_at, checkout_ref, payment_method, payment_status,
                     user_id, shift_id, table_id)
-                   VALUES (?, 'sale', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, 'sale', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     product_id,
                     quantity,
                     unit_price,
+                    cost_price,
                     line_total,
                     notes_text,
                     ts,
@@ -2814,17 +2911,31 @@ def restock_product():
         }), 400
 
     ts = now_iso()
-    unit_price = float(data.get("unit_price", row["price"]))
+    try:
+        unit_price = float(data.get("unit_price", _product_cost_value(row)))
+        if unit_price < 0:
+            return jsonify({"error": "Purchase price must be zero or positive"}), 400
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid purchase price"}), 400
     new_qty = row["quantity"] + quantity
 
-    db.execute("UPDATE products SET quantity=?, updated_at=? WHERE id=?",
-               (new_qty, ts, product_id))
+    db.execute(
+        "UPDATE products SET quantity=?, cost_price=?, updated_at=? WHERE id=?",
+        (new_qty, unit_price, ts, product_id),
+    )
     db.execute(
         """INSERT INTO transactions
-           (product_id, type, quantity, unit_price, total_amount, notes, created_at)
-           VALUES (?, 'restock', ?, ?, ?, ?, ?)""",
-        (product_id, quantity, unit_price, round(unit_price * quantity, 2),
-         (data.get("notes") or "Stock replenishment").strip(), ts),
+           (product_id, type, quantity, unit_price, cost_price, total_amount, notes, created_at)
+           VALUES (?, 'restock', ?, ?, ?, ?, ?, ?)""",
+        (
+            product_id,
+            quantity,
+            unit_price,
+            unit_price,
+            round(unit_price * quantity, 2),
+            (data.get("notes") or "Stock replenishment").strip(),
+            ts,
+        ),
     )
     db.commit()
 
@@ -3336,59 +3447,38 @@ def dashboard_stats():
     prev_month_from = prev_month_start.strftime("%Y-%m-%d")
     prev_month_to = prev_month_end.strftime("%Y-%m-%d")
 
-    sales_today = db.execute(
-        f"""SELECT COALESCE(SUM(total_amount), 0) AS revenue,
-                  COALESCE(SUM(quantity), 0) AS units
-           FROM transactions WHERE type='sale'{_not_voided_clause()} AND substr(created_at, 1, 10) = ?""",
-        (today,),
-    ).fetchone()
+    def _sales_period(day_from, day_to=None):
+        if day_to is None:
+            return db.execute(
+                f"""SELECT COALESCE(SUM(total_amount), 0) AS revenue,
+                          COALESCE(SUM(COALESCE(cost_price, 0) * quantity), 0) AS cogs,
+                          COALESCE(SUM(quantity), 0) AS units
+                   FROM transactions
+                   WHERE type='sale'{_not_voided_clause()}
+                     AND substr(created_at, 1, 10) = ?""",
+                (day_from,),
+            ).fetchone()
+        return db.execute(
+            f"""SELECT COALESCE(SUM(total_amount), 0) AS revenue,
+                      COALESCE(SUM(COALESCE(cost_price, 0) * quantity), 0) AS cogs,
+                      COALESCE(SUM(quantity), 0) AS units
+               FROM transactions
+               WHERE type='sale'{_not_voided_clause()}
+                 AND substr(created_at, 1, 10) >= ?
+                 AND substr(created_at, 1, 10) <= ?""",
+            (day_from, day_to),
+        ).fetchone()
 
-    sales_week = db.execute(
-        f"""SELECT COALESCE(SUM(total_amount), 0) AS revenue,
-                  COALESCE(SUM(quantity), 0) AS units
-           FROM transactions
-           WHERE type='sale'{_not_voided_clause()}
-             AND substr(created_at, 1, 10) >= ?
-             AND substr(created_at, 1, 10) <= ?""",
-        (week_from, week_to),
-    ).fetchone()
+    sales_today = _sales_period(today)
+    sales_week = _sales_period(week_from, week_to)
+    sales_month = _sales_period(month_from, month_to)
+    sales_yesterday = _sales_period(yesterday_str)
+    sales_prev_week = _sales_period(prev_week_from, prev_week_to)
+    sales_prev_month = _sales_period(prev_month_from, prev_month_to)
 
-    sales_month = db.execute(
-        f"""SELECT COALESCE(SUM(total_amount), 0) AS revenue,
-                  COALESCE(SUM(quantity), 0) AS units
-           FROM transactions
-           WHERE type='sale'{_not_voided_clause()}
-             AND substr(created_at, 1, 10) >= ?
-             AND substr(created_at, 1, 10) <= ?""",
-        (month_from, month_to),
-    ).fetchone()
-
-    sales_yesterday = db.execute(
-        f"""SELECT COALESCE(SUM(total_amount), 0) AS revenue,
-                  COALESCE(SUM(quantity), 0) AS units
-           FROM transactions WHERE type='sale'{_not_voided_clause()} AND substr(created_at, 1, 10) = ?""",
-        (yesterday_str,),
-    ).fetchone()
-
-    sales_prev_week = db.execute(
-        f"""SELECT COALESCE(SUM(total_amount), 0) AS revenue,
-                  COALESCE(SUM(quantity), 0) AS units
-           FROM transactions
-           WHERE type='sale'{_not_voided_clause()}
-             AND substr(created_at, 1, 10) >= ?
-             AND substr(created_at, 1, 10) <= ?""",
-        (prev_week_from, prev_week_to),
-    ).fetchone()
-
-    sales_prev_month = db.execute(
-        f"""SELECT COALESCE(SUM(total_amount), 0) AS revenue,
-                  COALESCE(SUM(quantity), 0) AS units
-           FROM transactions
-           WHERE type='sale'{_not_voided_clause()}
-             AND substr(created_at, 1, 10) >= ?
-             AND substr(created_at, 1, 10) <= ?""",
-        (prev_month_from, prev_month_to),
-    ).fetchone()
+    profit_today = _profit_metrics(sales_today["revenue"], sales_today["cogs"])
+    profit_week = _profit_metrics(sales_week["revenue"], sales_week["cogs"])
+    profit_month = _profit_metrics(sales_month["revenue"], sales_month["cogs"])
 
     seven_days_ago = (today_date_obj - timedelta(days=6)).strftime("%Y-%m-%d")
     daily_rows = db.execute(
@@ -3488,14 +3578,23 @@ def dashboard_stats():
         "cup_inventory": cup_stock,
         "revenue_today": round(sales_today["revenue"], 2),
         "units_sold_today": sales_today["units"],
+        "cogs_today": profit_today["cogs"],
+        "gross_profit_today": profit_today["gross_profit"],
+        "gross_margin_pct_today": profit_today["gross_margin_pct"],
         "revenue_yesterday": round(sales_yesterday["revenue"], 2),
         "units_sold_yesterday": sales_yesterday["units"],
         "revenue_week": round(sales_week["revenue"], 2),
         "units_sold_week": sales_week["units"],
+        "cogs_week": profit_week["cogs"],
+        "gross_profit_week": profit_week["gross_profit"],
+        "gross_margin_pct_week": profit_week["gross_margin_pct"],
         "revenue_prev_week": round(sales_prev_week["revenue"], 2),
         "units_sold_prev_week": sales_prev_week["units"],
         "revenue_month": round(sales_month["revenue"], 2),
         "units_sold_month": sales_month["units"],
+        "cogs_month": profit_month["cogs"],
+        "gross_profit_month": profit_month["gross_profit"],
+        "gross_margin_pct_month": profit_month["gross_margin_pct"],
         "revenue_prev_month": round(sales_prev_month["revenue"], 2),
         "units_sold_prev_month": sales_prev_month["units"],
         "daily_revenue_7d": daily_revenue_7d,

@@ -75,10 +75,25 @@ NOT_VOIDED = " AND voided_at IS NULL"
 NOT_VOIDED_T = " AND t.voided_at IS NULL"
 
 
+def _profit_metrics(revenue, cogs):
+    revenue = float(revenue or 0)
+    cogs = float(cogs or 0)
+    gross_profit = round(revenue - cogs, 2)
+    gross_margin_pct = (
+        round((gross_profit / revenue) * 100, 1) if revenue > 0 else None
+    )
+    return {
+        "cogs": round(cogs, 2),
+        "gross_profit": gross_profit,
+        "gross_margin_pct": gross_margin_pct,
+    }
+
+
 def sales_summary(db, date_from, date_to, user_id=None):
     user_clause, user_params = _sale_user_clause(user_id)
     row = db.execute(
         f"""SELECT COALESCE(SUM(total_amount), 0) AS revenue,
+                  COALESCE(SUM(COALESCE(cost_price, 0) * quantity), 0) AS cogs,
                   COALESCE(SUM(quantity), 0) AS units,
                   COUNT(*) AS transactions
            FROM transactions
@@ -87,10 +102,12 @@ def sales_summary(db, date_from, date_to, user_id=None):
              AND substr(created_at, 1, 10) <= ?{user_clause}""",
         (date_from, date_to, *user_params),
     ).fetchone()
+    metrics = _profit_metrics(row["revenue"], row["cogs"])
     return {
         "revenue": round(row["revenue"], 2),
         "units": row["units"],
         "transactions": row["transactions"],
+        **metrics,
     }
 
 

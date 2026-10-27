@@ -143,6 +143,22 @@ function isSeller() {
   return state.currentUser?.role === "seller";
 }
 
+function canViewCost() {
+  const role = state.currentUser?.role;
+  return role === "admin" || role === "stock_manager" || role === "supervisor";
+}
+
+function canEditCost() {
+  const role = state.currentUser?.role;
+  return role === "admin" || role === "stock_manager";
+}
+
+function formatMargin(p) {
+  if (p.margin == null) return "—";
+  const pct = p.margin_pct != null ? ` (${p.margin_pct}%)` : "";
+  return `${fmt.format(p.margin)}${pct}`;
+}
+
 function canViewShiftReports() {
   const role = state.currentUser?.role;
   return role === "admin" || role === "supervisor" || role === "stock_manager";
@@ -1030,20 +1046,22 @@ function renderDashboard(d) {
     ? formatDateLabel(d.today_date)
     : "Today";
 
+  const marginToday =
+    d.gross_margin_pct_today != null ? `${d.gross_margin_pct_today}% margin` : "No margin yet";
   document.getElementById("dashboard-stats").innerHTML = `
     ${statCardComparison("revenue", UI_ICONS.revenue, "Sold Today", fmt.format(d.revenue_today),
       `${fmtNum.format(d.units_sold_today)} units · ${todayLabel}`,
       d.revenue_today, d.revenue_yesterday, "yesterday", true)}
-    ${statCardComparison("sales", UI_ICONS.sales, "This Week", fmt.format(d.revenue_week),
-      `${fmtNum.format(d.units_sold_week)} units`,
+    ${statCardComparison("sales", UI_ICONS.sales, "Profit Today", fmt.format(d.gross_profit_today || 0),
+      marginToday, null, null, null)}
+    ${statCardComparison("month", UI_ICONS.chart, "This Week", fmt.format(d.revenue_week),
+      `Profit ${fmt.format(d.gross_profit_week || 0)}${d.gross_margin_pct_week != null ? ` · ${d.gross_margin_pct_week}%` : ""}`,
       d.revenue_week, d.revenue_prev_week, "last week")}
-    ${statCardComparison("month", UI_ICONS.chart, "This Month", fmt.format(d.revenue_month),
-      `${fmtNum.format(d.units_sold_month)} units`,
+    ${statCardComparison("stock", UI_ICONS.stock, "This Month", fmt.format(d.revenue_month),
+      `Profit ${fmt.format(d.gross_profit_month || 0)}${d.gross_margin_pct_month != null ? ` · ${d.gross_margin_pct_month}%` : ""}`,
       d.revenue_month, d.revenue_prev_month, "last month")}
-    ${statCardComparison("stock", UI_ICONS.stock, "Inventory Value", fmt.format(d.inventory_value),
-      `${d.total_products} products`, null, null, null)}
     ${statCardComparison("alert", UI_ICONS.alert, "Stock Alerts", d.low_stock_count,
-      `${d.out_of_stock_count} out of stock`, null, null, null)}
+      `${d.out_of_stock_count} out of stock · Inv ${fmt.format(d.inventory_value)}`, null, null, null)}
   `;
 
   const labelEl = document.getElementById("low-stock-label");
@@ -1188,7 +1206,7 @@ async function loadProducts() {
   if (category) params.set("category", category);
   if (lowStock) params.set("low_stock", "1");
 
-  showTableSkeleton("products-table-body", 6);
+  showTableSkeleton("products-table-body", 8);
 
   try {
     state.products = await api(`/api/products?${params}`);
@@ -1208,7 +1226,7 @@ function renderProductsTable(products) {
   }
 
   if (!products.length) {
-    tbody.innerHTML = `<tr><td colspan="6">${emptyState(UI_ICONS.box, "No products found", "Try adjusting your filters or add your first item.")}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8">${emptyState(UI_ICONS.box, "No products found", "Try adjusting your filters or add your first item.")}</td></tr>`;
     return;
   }
 
@@ -1249,6 +1267,8 @@ function renderProductsTable(products) {
       </td>
       <td><span class="badge badge-category">${esc(p.category)}</span></td>
       <td>${fmt.format(p.price)}</td>
+      <td>${p.cost_price != null ? fmt.format(p.cost_price) : "—"}</td>
+      <td>${formatMargin(p)}</td>
       <td><strong>${p.uses_cup_stock ? `${fmtNum.format(p.quantity)} cups` : fmtNum.format(p.quantity)}</strong></td>
       <td><span class="badge badge-stock ${p.stock_status}">${stockLabel(p)}</span></td>
       <td>
@@ -1306,6 +1326,7 @@ function openAddProduct() {
       document.getElementById("product-id").value = "";
       document.getElementById("product-quantity-label").textContent = "Initial Quantity";
       document.getElementById("product-reorder").value = "10";
+      document.getElementById("product-cost-price").value = "0";
       populateCategorySelects();
       showModal("product-modal");
     })
@@ -1321,6 +1342,7 @@ async function openEditProduct(id) {
     document.getElementById("product-name").value = p.name;
     document.getElementById("product-category").value = p.category;
     document.getElementById("product-price").value = p.price;
+    document.getElementById("product-cost-price").value = p.cost_price != null ? p.cost_price : 0;
     document.getElementById("product-quantity").value = p.quantity;
     document.getElementById("product-quantity-label").textContent = "Stock Quantity";
     document.getElementById("product-reorder").value = p.reorder_level;
@@ -1357,6 +1379,7 @@ async function saveProduct(e) {
     name,
     category,
     price: parseFloat(document.getElementById("product-price").value),
+    cost_price: parseFloat(document.getElementById("product-cost-price").value) || 0,
     reorder_level: parseInt(document.getElementById("product-reorder").value, 10),
     description: document.getElementById("product-description").value,
     quantity: parseInt(document.getElementById("product-quantity").value, 10) || 0,
@@ -3272,10 +3295,19 @@ function updateRestockPreview() {
   }
 
   const qty = parseInt(document.getElementById("restock-quantity")?.value, 10) || 0;
+  const costInput = document.getElementById("restock-cost-price");
+  if (costInput && document.activeElement !== costInput) {
+    const currentCost = product.cost_price != null ? product.cost_price : 0;
+    if (!costInput.dataset.touched) {
+      costInput.value = String(currentCost);
+    }
+  }
+  const cost = parseFloat(costInput?.value) || 0;
   preview.hidden = false;
   document.getElementById("restock-preview-avatar").textContent = productInitials(product.name);
   document.getElementById("restock-preview-name").textContent = product.name;
-  document.getElementById("restock-preview-meta").textContent = `${product.category} · ${fmt.format(product.price)} each`;
+  document.getElementById("restock-preview-meta").textContent =
+    `${product.category} · sell ${fmt.format(product.price)} · cost ${fmt.format(cost)}${qty ? ` · total ${fmt.format(cost * qty)}` : ""}`;
   document.getElementById("restock-preview-current").textContent = fmtNum.format(product.quantity);
   document.getElementById("restock-preview-after").textContent = fmtNum.format(product.quantity + qty);
 }
@@ -3332,17 +3364,23 @@ function adjustRestockQty(delta) {
 async function submitRestock(e) {
   e.preventDefault();
   try {
+    const costInput = document.getElementById("restock-cost-price");
     const result = await api("/api/restock", {
       method: "POST",
       body: JSON.stringify({
         product_id: parseInt(document.getElementById("restock-product").value, 10),
         quantity: parseInt(document.getElementById("restock-quantity").value, 10),
+        unit_price: parseFloat(costInput?.value) || 0,
         notes: document.getElementById("restock-notes").value,
       }),
     });
     toast(`Restocked ${result.name} — now ${result.quantity} units`);
     document.getElementById("restock-form").reset();
     document.getElementById("restock-quantity").value = "10";
+    if (costInput) {
+      costInput.value = "0";
+      delete costInput.dataset.touched;
+    }
     document.getElementById("restock-preview").hidden = true;
     switchView("products");
   } catch (err) {
@@ -3377,8 +3415,17 @@ document.getElementById("adjust-product")?.addEventListener("change", () => {
 });
 
 document.getElementById("adjust-quantity")?.addEventListener("input", updateAdjustPreview);
-document.getElementById("restock-product")?.addEventListener("change", updateRestockPreview);
+document.getElementById("restock-product")?.addEventListener("change", () => {
+  const costInput = document.getElementById("restock-cost-price");
+  if (costInput) delete costInput.dataset.touched;
+  updateRestockPreview();
+});
 document.getElementById("restock-quantity")?.addEventListener("input", updateRestockPreview);
+document.getElementById("restock-cost-price")?.addEventListener("input", () => {
+  const costInput = document.getElementById("restock-cost-price");
+  if (costInput) costInput.dataset.touched = "1";
+  updateRestockPreview();
+});
 document.getElementById("restock-qty-minus")?.addEventListener("click", () => adjustRestockQty(-1));
 document.getElementById("restock-qty-plus")?.addEventListener("click", () => adjustRestockQty(1));
 
@@ -4071,11 +4118,15 @@ function renderSalesDonut(canvasId, legendId, items, labelKey, valueKey, colorFn
 function renderSalesReport(report) {
   const { summary, daily_breakdown, payment_breakdown, category_breakdown, sales, from, to } = report;
 
+  const marginLabel =
+    summary.gross_margin_pct != null
+      ? `${summary.gross_margin_pct}% margin`
+      : "Set purchase prices to track profit";
   document.getElementById("sales-summary-stats").innerHTML = `
     ${statCard("revenue", UI_ICONS.revenue, "Total Revenue", fmt.format(summary.revenue), formatRangeLabel(from, to))}
-    ${statCard("sales", UI_ICONS.sales, "Units Sold", fmtNum.format(summary.units), "items in this period")}
-    ${statCard("stock", UI_ICONS.chart, "Transactions", fmtNum.format(summary.transactions), "sales recorded")}
-    ${statCard("alert", UI_ICONS.calendar, "Active Days", daily_breakdown.length, "days with sales")}
+    ${statCard("sales", UI_ICONS.sales, "Gross Profit", fmt.format(summary.gross_profit || 0), marginLabel)}
+    ${statCard("stock", UI_ICONS.chart, "Cost of Goods", fmt.format(summary.cogs || 0), `${fmtNum.format(summary.units)} units sold`)}
+    ${statCard("alert", UI_ICONS.calendar, "Active Days", daily_breakdown.length, `${fmtNum.format(summary.transactions)} sales recorded`)}
   `;
 
   document.getElementById("sales-range-label").textContent = formatRangeLabel(from, to);
@@ -5102,7 +5153,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const debouncedLoadProducts = debounce(loadProducts, 300);
   document.getElementById("product-search").addEventListener("input", () => {
-    showTableSkeleton("products-table-body", 6);
+    showTableSkeleton("products-table-body", 8);
     debouncedLoadProducts();
   });
   document.getElementById("product-category-filter").addEventListener("change", loadProducts);

@@ -313,7 +313,9 @@
               <tr>
                 <th>Product</th>
                 <th>Category</th>
-                <th>Price</th>
+                <th>Sell</th>
+                <th>Cost</th>
+                <th>Margin</th>
                 <th>Stock</th>
                 <th>Status</th>
                 <th>Actions</th>
@@ -840,6 +842,12 @@
                         <button type="button" class="qty-preset" data-qty="25">+25</button>
                         <button type="button" class="qty-preset" data-qty="50">+50</button>
                       </div>
+                    </div>
+
+                    <div class="form-group">
+                      <label for="restock-cost-price">Purchase Price (RWF)</label>
+                      <input type="number" id="restock-cost-price" min="0" step="100" value="0">
+                      <p class="form-hint">What you paid per unit for this delivery. Updates the product’s cost.</p>
                     </div>
 
                     <div class="form-group">
@@ -1666,9 +1674,15 @@
             <option value="">Choose a category...</option>
           </select>
         </div>
-        <div class="form-group">
-          <label for="product-price">Unit Price (RWF) *</label>
-          <input type="number" id="product-price" min="0" step="100" required>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="product-price">Sell Price (RWF) *</label>
+            <input type="number" id="product-price" min="0" step="100" required>
+          </div>
+          <div class="form-group">
+            <label for="product-cost-price">Purchase Price (RWF)</label>
+            <input type="number" id="product-cost-price" min="0" step="100" value="0">
+          </div>
         </div>
         <div id="product-stock-fields">
           <div class="form-row">
