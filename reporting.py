@@ -303,28 +303,45 @@ def low_stock_items(db, limit=8, business_id=None):
     return items[:limit]
 
 
-def seller_shifts_for_day(db, user_id, report_date):
-    rows = db.execute(
-        """SELECT status, opened_at, closed_at, total_sales, cash_sales,
-                  momo_sales, visa_sales, units_sold, sale_count, variance,
-                  counted_cash, expected_cash
-           FROM seller_shifts
-           WHERE user_id = ?
-             AND (substr(opened_at, 1, 10) = ? OR substr(closed_at, 1, 10) = ?)
-           ORDER BY opened_at ASC""",
-        (user_id, report_date, report_date),
-    ).fetchall()
+def seller_shifts_for_day(db, user_id, report_date, business_id=None):
+    query = """
+        SELECT status, opened_at, closed_at, total_sales, cash_sales,
+               momo_sales, visa_sales, units_sold, sale_count, variance,
+               counted_cash, expected_cash
+        FROM seller_shifts
+        WHERE user_id = ?
+          AND (substr(opened_at, 1, 10) = ? OR substr(closed_at, 1, 10) = ?)
+    """
+    params = [user_id, report_date, report_date]
+    if business_id is not None:
+        query += " AND business_id = ?"
+        params.append(int(business_id))
+    query += " ORDER BY opened_at ASC"
+    rows = db.execute(query, params).fetchall()
     return [dict(row) for row in rows]
 
 
-def report_recipients(db):
-    rows = db.execute(
-        """SELECT id, display_name, email, role
-           FROM users
-           WHERE is_active = 1
-             AND email IS NOT NULL
-             AND TRIM(email) != ''"""
-    ).fetchall()
+def report_recipients(db, business_id=None):
+    if business_id is not None:
+        rows = db.execute(
+            """SELECT u.id, u.display_name, u.email, m.role
+               FROM users u
+               JOIN user_business_memberships m
+                 ON m.user_id = u.id AND m.business_id = ?
+               WHERE u.is_active = 1
+                 AND m.is_active = 1
+                 AND u.email IS NOT NULL
+                 AND TRIM(u.email) != ''""",
+            (int(business_id),),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            """SELECT id, display_name, email, role
+               FROM users
+               WHERE is_active = 1
+                 AND email IS NOT NULL
+                 AND TRIM(email) != ''"""
+        ).fetchall()
     admin_roles = {"admin", "supervisor", "stock_manager"}
     admins = []
     sellers = []
@@ -350,6 +367,7 @@ def extra_report_emails():
 def build_admin_daily_report(db, report_date, business_id=None):
     return {
         "report_date": report_date,
+        "business_id": business_id,
         "summary": sales_summary(
             db, report_date, report_date, business_id=business_id
         ),
@@ -359,21 +377,34 @@ def build_admin_daily_report(db, report_date, business_id=None):
         "categories": category_breakdown(
             db, report_date, report_date, business_id=business_id
         ),
-        "sellers": seller_breakdown(db, report_date),
-        "top_products": top_products_for_day(db, report_date),
-        "low_stock": low_stock_items(db),
+        "sellers": seller_breakdown(db, report_date, business_id=business_id),
+        "top_products": top_products_for_day(
+            db, report_date, business_id=business_id
+        ),
+        "low_stock": low_stock_items(db, business_id=business_id),
     }
 
 
-def build_seller_daily_report(db, user_id, display_name, report_date):
+def build_seller_daily_report(db, user_id, display_name, report_date, business_id=None):
     return {
         "report_date": report_date,
+        "business_id": business_id,
         "seller_name": display_name,
-        "summary": sales_summary(db, report_date, report_date, user_id=user_id),
-        "payments": payment_breakdown(db, report_date, report_date, user_id=user_id),
-        "categories": category_breakdown(db, report_date, report_date, user_id=user_id),
-        "top_products": top_products_for_day(db, report_date, user_id=user_id),
-        "shifts": seller_shifts_for_day(db, user_id, report_date),
+        "summary": sales_summary(
+            db, report_date, report_date, user_id=user_id, business_id=business_id
+        ),
+        "payments": payment_breakdown(
+            db, report_date, report_date, user_id=user_id, business_id=business_id
+        ),
+        "categories": category_breakdown(
+            db, report_date, report_date, user_id=user_id, business_id=business_id
+        ),
+        "top_products": top_products_for_day(
+            db, report_date, user_id=user_id, business_id=business_id
+        ),
+        "shifts": seller_shifts_for_day(
+            db, user_id, report_date, business_id=business_id
+        ),
     }
 
 
