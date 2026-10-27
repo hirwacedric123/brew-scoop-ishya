@@ -54,6 +54,7 @@ from business import (
     get_business_by_id,
     get_membership,
     init_business_tables,
+    list_switchable_businesses,
     list_user_memberships,
     platform_admin_required,
     row_to_business,
@@ -1360,7 +1361,10 @@ def _login_candidates(db, matches):
 
 def _session_auth_payload(db, user_row):
     biz_id = current_business_id()
-    memberships = list_user_memberships(db, user_row["id"], active_only=True)
+    is_platform = bool(row_to_user(user_row).get("is_platform_admin"))
+    memberships = list_switchable_businesses(
+        db, user_row["id"], is_platform_admin=is_platform
+    )
     role = current_user_role(db, user_row)
     user_data = public_user(user_row, membership_role=role)
     business = None
@@ -1371,6 +1375,8 @@ def _session_auth_payload(db, user_row):
             membership = get_membership(db, user_row["id"], biz_id)
             if membership:
                 business["role"] = membership["role"]
+            elif is_platform:
+                business["role"] = "admin"
     return {
         "user": user_data,
         "business": business,
@@ -1771,6 +1777,9 @@ def admin_list_users():
 @app.route("/api/admin/attendance", methods=["GET"])
 @role_required("admin", "supervisor")
 def admin_attendance():
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
     date_from = request.args.get("from", "").strip() or today_kigali()
     date_to = request.args.get("to", "").strip() or date_from
     user_id = _parse_user_id_filter(request.args.get("user_id", "").strip())
@@ -1782,10 +1791,11 @@ def admin_attendance():
         SELECT s.*, u.display_name, u.username, u.role
         FROM seller_sessions s
         JOIN users u ON u.id = s.user_id
-        WHERE substr(s.logged_in_at, 1, 10) >= ?
+        WHERE s.business_id = ?
+          AND substr(s.logged_in_at, 1, 10) >= ?
           AND substr(s.logged_in_at, 1, 10) <= ?
     """
-    params = [date_from, date_to]
+    params = [biz_id, date_from, date_to]
     if user_id is not None:
         query += " AND s.user_id = ?"
         params.append(user_id)
@@ -2289,9 +2299,10 @@ def update_product(product_id):
         diff = new_quantity - old_quantity
         db.execute(
             """INSERT INTO transactions
-               (product_id, type, quantity, unit_price, total_amount, notes, created_at)
-               VALUES (?, 'adjustment', ?, ?, 0, ?, ?)""",
+               (business_id, product_id, type, quantity, unit_price, total_amount, notes, created_at)
+               VALUES (?, ?, 'adjustment', ?, ?, 0, ?, ?)""",
             (
+                biz_id,
                 product_id,
                 diff,
                 float(data["price"]),
@@ -2772,11 +2783,15 @@ def settle_credit_sale():
         return jsonify({"error": "Select how it was paid: MoMo, Cash, or Visa"}), 400
 
     db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
     user = get_current_user(db)
     rows = db.execute(
         """SELECT * FROM transactions
-           WHERE type = 'sale' AND checkout_ref = ? AND voided_at IS NULL""",
-        (checkout_ref,),
+           WHERE type = 'sale' AND checkout_ref = ? AND business_id = ?
+             AND voided_at IS NULL""",
+        (checkout_ref, biz_id),
     ).fetchall()
     if not rows:
         return jsonify({"error": "Sale not found"}), 404
@@ -2803,12 +2818,14 @@ def settle_credit_sale():
                settled_at = ?,
                settled_method = ?,
                settled_by = ?
-           WHERE type = 'sale' AND checkout_ref = ? AND voided_at IS NULL""",
-        (ts, method, user["id"], checkout_ref),
+           WHERE type = 'sale' AND checkout_ref = ? AND business_id = ?
+             AND voided_at IS NULL""",
+        (ts, method, user["id"], checkout_ref, biz_id),
     )
     log_activity(
         db,
         action="sale.settle_credit",
+        business_id=biz_id,
         entity_type="checkout",
         entity_id=checkout_ref,
         details={"settled_method": method},
@@ -2824,9 +2841,9 @@ def settle_credit_sale():
            JOIN products p ON p.id = t.product_id
            LEFT JOIN users u ON u.id = t.user_id
            LEFT JOIN service_tables st ON st.id = t.table_id
-           WHERE t.type = 'sale' AND t.checkout_ref = ?
+           WHERE t.type = 'sale' AND t.checkout_ref = ? AND t.business_id = ?
            ORDER BY t.id ASC""",
-        (checkout_ref,),
+        (checkout_ref, biz_id),
     ).fetchall()
     txs = [row_to_transaction(r) for r in updated]
     groups = _group_sale_activity(txs)
@@ -2836,32 +2853,38 @@ def settle_credit_sale():
     })
 
 
-def _execute_void_sale(db, checkout_ref, voided_by_user_id):
+def _execute_void_sale(db, checkout_ref, voided_by_user_id, business_id=None):
     checkout_ref = (checkout_ref or "").strip()
     if not checkout_ref:
         return None, "Sale reference is required", 400
+    if business_id is None:
+        business_id = current_business_id()
+    if business_id is None:
+        return None, "No business selected", 400
 
     rows = db.execute(
         """SELECT t.*, p.category
            FROM transactions t
            JOIN products p ON p.id = t.product_id
-           WHERE t.type = 'sale' AND t.checkout_ref = ? AND t.voided_at IS NULL""",
-        (checkout_ref,),
+           WHERE t.type = 'sale' AND t.checkout_ref = ? AND t.business_id = ?
+             AND t.voided_at IS NULL""",
+        (checkout_ref, business_id),
     ).fetchall()
     if not rows:
         existing = db.execute(
             """SELECT 1 FROM transactions
-               WHERE type = 'sale' AND checkout_ref = ? AND voided_at IS NOT NULL
+               WHERE type = 'sale' AND checkout_ref = ? AND business_id = ?
+                 AND voided_at IS NOT NULL
                LIMIT 1""",
-            (checkout_ref,),
+            (checkout_ref, business_id),
         ).fetchone()
         if existing:
             return None, "Sale already voided", 409
         return None, "Sale not found", 404
 
     ts = now_iso()
-    category_cup_map = get_category_cup_map(db)
-    cup_inv = get_cup_inventory(db)
+    category_cup_map = get_category_cup_map(db, business_id)
+    cup_inv = get_cup_inventory(db, business_id)
     cup_units_restore = 0
 
     db.execute("BEGIN IMMEDIATE")
@@ -2875,24 +2898,28 @@ def _execute_void_sale(db, checkout_ref, voided_by_user_id):
                 cup_units_restore += quantity
             else:
                 product = db.execute(
-                    "SELECT quantity FROM products WHERE id = ?", (product_id,)
+                    """SELECT quantity FROM products
+                       WHERE id = ? AND business_id = ?""",
+                    (product_id, business_id),
                 ).fetchone()
+                if not product:
+                    raise ValueError("Product missing for void restore")
                 new_qty = product["quantity"] + quantity
                 db.execute(
-                    "UPDATE products SET quantity=?, updated_at=? WHERE id=?",
-                    (new_qty, ts, product_id),
+                    """UPDATE products SET quantity=?, updated_at=?
+                       WHERE id=? AND business_id=?""",
+                    (new_qty, ts, product_id, business_id),
                 )
 
         if cup_units_restore > 0:
             new_cups = cup_inv["quantity"] + cup_units_restore
-            biz_id = cup_inv["business_id"] if "business_id" in cup_inv.keys() else current_business_id()
-            _set_cup_quantity(db, biz_id, new_cups, ts)
+            _set_cup_quantity(db, business_id, new_cups, ts)
             db.execute(
                 """INSERT INTO cup_transactions
                    (business_id, type, quantity, notes, checkout_ref, created_at)
                    VALUES (?, 'adjustment', ?, ?, ?, ?)""",
                 (
-                    biz_id,
+                    business_id,
                     cup_units_restore,
                     f"Void sale {checkout_ref}",
                     checkout_ref,
@@ -2902,12 +2929,14 @@ def _execute_void_sale(db, checkout_ref, voided_by_user_id):
 
         db.execute(
             """UPDATE transactions SET voided_at = ?, voided_by = ?
-               WHERE type = 'sale' AND checkout_ref = ? AND voided_at IS NULL""",
-            (ts, voided_by_user_id, checkout_ref),
+               WHERE type = 'sale' AND checkout_ref = ? AND business_id = ?
+                 AND voided_at IS NULL""",
+            (ts, voided_by_user_id, checkout_ref, business_id),
         )
         log_activity(
             db,
             action="sale.void",
+            business_id=business_id,
             user_id=voided_by_user_id,
             entity_type="checkout",
             entity_id=checkout_ref,
@@ -2936,6 +2965,9 @@ def void_sale():
         return jsonify({"error": "Admin password is required"}), 400
 
     db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
     user = get_current_user(db)
 
     if not verify_admin_password(db, admin_password):
@@ -2943,16 +2975,18 @@ def void_sale():
 
     owner_row = db.execute(
         """SELECT user_id FROM transactions
-           WHERE type = 'sale' AND checkout_ref = ? AND voided_at IS NULL
+           WHERE type = 'sale' AND checkout_ref = ? AND business_id = ?
+             AND voided_at IS NULL
            LIMIT 1""",
-        (checkout_ref,),
+        (checkout_ref, biz_id),
     ).fetchone()
     if not owner_row:
         existing = db.execute(
             """SELECT 1 FROM transactions
-               WHERE type = 'sale' AND checkout_ref = ? AND voided_at IS NOT NULL
+               WHERE type = 'sale' AND checkout_ref = ? AND business_id = ?
+                 AND voided_at IS NOT NULL
                LIMIT 1""",
-            (checkout_ref,),
+            (checkout_ref, biz_id),
         ).fetchone()
         if existing:
             return jsonify({"error": "Sale already voided"}), 409
@@ -2961,7 +2995,9 @@ def void_sale():
     if user["role"] == "seller" and owner_row["user_id"] != user["id"]:
         return jsonify({"error": "You can only void your own sales"}), 403
 
-    result, error, status = _execute_void_sale(db, checkout_ref, user["id"])
+    result, error, status = _execute_void_sale(
+        db, checkout_ref, user["id"], business_id=biz_id
+    )
     if error:
         return jsonify({"error": error}), status
     return jsonify({**result, "message": "Sale voided and stock restored"})
@@ -3088,16 +3124,21 @@ def _joinable_shift_summary(db, row):
     }
 
 
-def _last_closed_shift_for_user(db, user_id):
-    return db.execute(
-        """SELECT s.*
-           FROM seller_shifts s
-           JOIN shift_members m ON m.shift_id = s.id
-           WHERE s.status = 'closed' AND m.user_id = ?
-           ORDER BY s.closed_at DESC
-           LIMIT 1""",
-        (user_id,),
-    ).fetchone()
+def _last_closed_shift_for_user(db, user_id, business_id=None):
+    if business_id is None:
+        business_id = current_business_id()
+    query = """
+        SELECT s.*
+        FROM seller_shifts s
+        JOIN shift_members m ON m.shift_id = s.id
+        WHERE s.status = 'closed' AND m.user_id = ?
+    """
+    params = [user_id]
+    if business_id is not None:
+        query += " AND s.business_id = ?"
+        params.append(business_id)
+    query += " ORDER BY s.closed_at DESC LIMIT 1"
+    return db.execute(query, params).fetchone()
 
 
 CASH_DENOMINATIONS = (5000, 2000, 1000, 500, 100, 50)
@@ -3458,7 +3499,7 @@ def seller_shift_start():
 
 
 def _collect_shift_admin_recipients(db):
-    admins, _sellers = report_recipients(db)
+    admins, _sellers = report_recipients(db, business_id=current_business_id())
     emails = [admin["email"] for admin in admins]
     emails.extend(extra_report_emails())
     seen = set()
@@ -3898,6 +3939,9 @@ def adjust_cups():
 @role_required("admin", "supervisor", "stock_manager")
 def list_transactions():
     db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
 
     limit = min(int(request.args.get("limit", 50)), 500)
     tx_type = request.args.get("type", "").strip()
@@ -3914,9 +3958,9 @@ def list_transactions():
         JOIN products p ON p.id = t.product_id
         LEFT JOIN users u ON u.id = t.user_id
         LEFT JOIN service_tables st ON st.id = t.table_id
-        WHERE 1=1
+        WHERE t.business_id = ?
     """
-    params = []
+    params = [biz_id]
     if tx_type:
         query += " AND t.type = ?"
         params.append(tx_type)
@@ -3942,11 +3986,17 @@ def list_transactions():
 @app.route("/api/sellers", methods=["GET"])
 @role_required("admin", "supervisor", "stock_manager")
 def list_sellers():
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
     rows = get_db().execute(
-        """SELECT id, display_name, username
-           FROM users
-           WHERE is_active = 1
-           ORDER BY display_name COLLATE NOCASE ASC, username COLLATE NOCASE ASC"""
+        """SELECT u.id, u.display_name, u.username
+           FROM users u
+           JOIN user_business_memberships m
+             ON m.user_id = u.id AND m.business_id = ?
+           WHERE u.is_active = 1 AND m.is_active = 1
+           ORDER BY u.display_name COLLATE NOCASE ASC, u.username COLLATE NOCASE ASC""",
+        (biz_id,),
     ).fetchall()
     return jsonify([
         {
@@ -3962,15 +4012,19 @@ def list_sellers():
 @role_required("admin", "supervisor", "stock_manager")
 def sales_dates():
     db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
     rows = db.execute(
         f"""SELECT substr(created_at, 1, 10) AS sale_date,
                   COALESCE(SUM(total_amount), 0) AS revenue,
                   COALESCE(SUM(quantity), 0) AS units,
                   COUNT(*) AS transactions
            FROM transactions
-           WHERE type = 'sale'{_not_voided_clause()}
+           WHERE type = 'sale' AND business_id = ?{_not_voided_clause()}
            GROUP BY sale_date
-           ORDER BY sale_date DESC"""
+           ORDER BY sale_date DESC""",
+        (biz_id,),
     ).fetchall()
     return jsonify([
         {
@@ -4030,7 +4084,9 @@ def sales_report():
     summary = _sales_summary(
         db, date_from, date_to, user_id, business_id=biz_id
     )
-    daily = _daily_sales_breakdown(db, date_from, date_to, user_id)
+    daily = _daily_sales_breakdown(
+        db, date_from, date_to, user_id, business_id=biz_id
+    )
     payments = _payment_breakdown(
         db, date_from, date_to, user_id, business_id=biz_id
     )
@@ -4174,6 +4230,9 @@ def _shifts_date_range_params():
 @role_required("admin", "supervisor", "stock_manager")
 def shifts_report():
     db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
 
     date_from, date_to, preset, error = _shifts_date_range_params()
     if error:
@@ -4195,13 +4254,14 @@ def shifts_report():
         f"""SELECT s.*, u.display_name AS seller_name
             FROM seller_shifts s
             JOIN users u ON u.id = s.user_id
-            WHERE (
+            WHERE s.business_id = ?
+              AND (
                 substr(s.opened_at, 1, 10) >= ? AND substr(s.opened_at, 1, 10) <= ?
                 OR (s.closed_at IS NOT NULL
                     AND substr(s.closed_at, 1, 10) >= ? AND substr(s.closed_at, 1, 10) <= ?)
-            ){user_clause}
+              ){user_clause}
             ORDER BY s.opened_at DESC""",
-        (date_from, date_to, date_from, date_to, *user_params),
+        (biz_id, date_from, date_to, date_from, date_to, *user_params),
     ).fetchall()
 
     shifts = [_shift_report_row(db, row) for row in rows]
@@ -4222,13 +4282,16 @@ def shifts_report():
 @role_required("admin", "supervisor", "stock_manager")
 def shift_detail(shift_id):
     db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
 
     row = db.execute(
         """SELECT s.*, u.display_name AS seller_name
            FROM seller_shifts s
            JOIN users u ON u.id = s.user_id
-           WHERE s.id = ?""",
-        (shift_id,),
+           WHERE s.id = ? AND s.business_id = ?""",
+        (shift_id, biz_id),
     ).fetchone()
     if not row:
         return jsonify({"error": "Shift not found"}), 404
@@ -4783,6 +4846,12 @@ def platform_create_business():
             )
             admin_user_id = cur.lastrowid
             upsert_membership(db, admin_user_id, business_id, "admin", True, ts)
+
+    # Keep the creating platform admin able to open the new business immediately.
+    creator = get_current_user(db)
+    if creator and row_to_user(creator).get("is_platform_admin"):
+        if creator["id"] != admin_user_id:
+            upsert_membership(db, creator["id"], business_id, "admin", True, ts)
 
     log_activity(
         db,
