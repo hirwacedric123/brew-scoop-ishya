@@ -62,6 +62,10 @@ const VIEW_TITLES = {
 
 const UI_STORAGE_KEY = "brew_scoop_ui_v1";
 
+function currentBusinessStorageId() {
+  return state.currentBusiness?.id ?? window.CURRENT_BUSINESS?.id ?? null;
+}
+
 function saveUIState() {
   try {
     const activeView =
@@ -69,6 +73,7 @@ function saveUIState() {
     localStorage.setItem(
       UI_STORAGE_KEY,
       JSON.stringify({
+        businessId: currentBusinessStorageId(),
         cart: state.cart,
         paymentMethod: state.paymentMethod,
         selectedTableId: state.selectedTableId,
@@ -89,11 +94,30 @@ function saveUIState() {
   }
 }
 
+function clearPosLocalState() {
+  state.cart = [];
+  state.selectedTableId = null;
+  state.paymentMethod = "momo";
+  state.sellCategory = "";
+  state.keepSellCategory = false;
+  state.historySellerId = "";
+  state.salesSellerId = "";
+}
+
 function restoreUIState() {
   try {
     const raw = localStorage.getItem(UI_STORAGE_KEY);
     if (!raw) return null;
     const saved = JSON.parse(raw);
+    const currentBiz = currentBusinessStorageId();
+    const savedBiz = saved.businessId ?? null;
+    const sameBusiness =
+      currentBiz == null || savedBiz == null || String(savedBiz) === String(currentBiz);
+
+    if (!sameBusiness) {
+      clearPosLocalState();
+      return null;
+    }
 
     if (Array.isArray(saved.cart) && saved.cart.length)
       state.cart = saved.cart;
@@ -717,24 +741,145 @@ async function loadActivityLogs() {
   }
 }
 
+function closeBusinessSwitcher() {
+  const wrap = document.getElementById("brand-business");
+  const menu = document.getElementById("business-switcher-menu");
+  const trigger = document.getElementById("business-switcher-trigger");
+  if (!wrap || !menu) return;
+  wrap.classList.remove("is-open");
+  menu.hidden = true;
+  if (trigger) trigger.setAttribute("aria-expanded", "false");
+}
+
+function openBusinessSwitcher() {
+  const wrap = document.getElementById("brand-business");
+  const menu = document.getElementById("business-switcher-menu");
+  const trigger = document.getElementById("business-switcher-trigger");
+  if (!wrap?.classList.contains("is-switchable") || !menu) return;
+  wrap.classList.add("is-open");
+  menu.hidden = false;
+  if (trigger) trigger.setAttribute("aria-expanded", "true");
+}
+
+function toggleBusinessSwitcher() {
+  const menu = document.getElementById("business-switcher-menu");
+  if (!menu) return;
+  if (menu.hidden) openBusinessSwitcher();
+  else closeBusinessSwitcher();
+}
+
+function formatBusinessRole(role) {
+  if (!role) return "";
+  return String(role).replace(/_/g, " ");
+}
+
+function renderBusinessSwitcher(memberships, currentBusinessId) {
+  const list = memberships || [];
+  const wrap = document.getElementById("brand-business");
+  const trigger = document.getElementById("business-switcher-trigger");
+  const nameEl = document.getElementById("current-business-name");
+  if (!wrap || !trigger) return;
+
+  const currentId = currentBusinessId ?? state.currentBusiness?.id;
+  const current =
+    list.find((m) => String(m.id) === String(currentId)) ||
+    state.currentBusiness;
+  if (nameEl && current?.name) nameEl.textContent = current.name;
+
+  const canSwitch =
+    list.length > 1 || !!state.currentUser?.is_platform_admin;
+
+  wrap.classList.toggle("is-switchable", canSwitch);
+  trigger.disabled = !canSwitch;
+  trigger.setAttribute(
+    "aria-label",
+    canSwitch ? "Switch business" : "Current business"
+  );
+  trigger.setAttribute("aria-haspopup", canSwitch ? "listbox" : "false");
+
+  let menu = document.getElementById("business-switcher-menu");
+  let options = document.getElementById("business-switcher-options");
+
+  if (!canSwitch || !list.length) {
+    closeBusinessSwitcher();
+    if (menu) menu.remove();
+    trigger.querySelector(".business-switcher-chevron")?.remove();
+    return;
+  }
+
+  if (!trigger.querySelector(".business-switcher-chevron")) {
+    const chevron = document.createElement("span");
+    chevron.className = "business-switcher-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg>';
+    trigger.appendChild(chevron);
+  }
+
+  if (!menu) {
+    menu = document.createElement("div");
+    menu.className = "business-switcher-menu";
+    menu.id = "business-switcher-menu";
+    menu.setAttribute("role", "listbox");
+    menu.setAttribute("aria-label", "Businesses");
+    menu.hidden = true;
+    menu.innerHTML =
+      '<p class="business-switcher-menu-label">Switch business</p><div class="business-switcher-options" id="business-switcher-options"></div>';
+    wrap.appendChild(menu);
+    options = document.getElementById("business-switcher-options");
+  }
+
+  if (!options) return;
+  options.innerHTML = list
+    .map((m) => {
+      const isCurrent = String(m.id) === String(currentId);
+      const role = formatBusinessRole(m.role);
+      return `
+        <button
+          type="button"
+          class="business-switcher-option${isCurrent ? " is-current" : ""}"
+          role="option"
+          data-business-id="${m.id}"
+          aria-selected="${isCurrent ? "true" : "false"}"
+        >
+          <span class="business-switcher-option-text">
+            <span class="business-switcher-option-name">${esc(m.name)}</span>
+            ${
+              role
+                ? `<span class="business-switcher-option-role">${esc(role)}</span>`
+                : ""
+            }
+          </span>
+          <span class="business-switcher-option-check" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="20 6 9 17 4 12"/></svg>
+          </span>
+        </button>`;
+    })
+    .join("");
+}
+
 async function switchBusiness(businessId) {
   try {
     const data = await api("/api/auth/switch-business", {
       method: "POST",
       body: JSON.stringify({ business_id: Number(businessId) }),
     });
+    clearPosLocalState();
     state.currentUser = data.user;
     state.currentBusiness = data.business;
     state.memberships = data.memberships || [];
     window.CURRENT_USER = data.user;
     window.CURRENT_BUSINESS = data.business;
     window.MEMBERSHIPS = data.memberships || [];
+    saveUIState();
     const nameEl = document.getElementById("current-business-name");
     if (nameEl && data.business) nameEl.textContent = data.business.name;
+    renderBusinessSwitcher(state.memberships, data.business?.id);
     toast(`Switched to ${data.business?.name || "business"}`);
     window.location.reload();
   } catch (err) {
     toast(err.message, "error");
+    renderBusinessSwitcher(state.memberships, state.currentBusiness?.id);
   }
 }
 
@@ -748,21 +893,30 @@ async function loadBusinessesAdmin() {
       tbody.innerHTML = `<tr><td colspan="5" class="empty-state">No businesses yet</td></tr>`;
       return;
     }
+    const currentId = state.currentBusiness?.id;
     tbody.innerHTML = state.businesses
-      .map(
-        (b) => `
+      .map((b) => {
+        const isCurrent = String(b.id) === String(currentId);
+        return `
       <tr>
-        <td><strong>${esc(b.name)}</strong></td>
+        <td><strong>${esc(b.name)}</strong>${isCurrent ? ' <span class="badge badge-stock ok">Current</span>' : ""}</td>
         <td>${esc(b.slug)}</td>
         <td>${fmtNum.format(b.member_count || 0)}</td>
         <td><span class="badge ${b.is_active ? "badge-stock ok" : "badge-stock out"}">${b.is_active ? "Active" : "Inactive"}</span></td>
         <td>
-          <button class="btn-icon" title="${b.is_active ? "Deactivate" : "Activate"}" onclick="toggleBusinessActive(${b.id}, ${b.is_active ? "false" : "true"})">
-            ${b.is_active ? "Pause" : "Activate"}
-          </button>
+          <div class="table-actions">
+            ${
+              b.is_active && !isCurrent
+                ? `<button type="button" class="btn btn-ghost btn-sm" onclick="switchBusiness(${b.id})">Switch</button>`
+                : ""
+            }
+            <button class="btn-icon" title="${b.is_active ? "Deactivate" : "Activate"}" onclick="toggleBusinessActive(${b.id}, ${b.is_active ? "false" : "true"})">
+              ${b.is_active ? "Pause" : "Activate"}
+            </button>
+          </div>
         </td>
-      </tr>`
-      )
+      </tr>`;
+      })
       .join("");
   } catch (err) {
     toast(err.message, "error");
@@ -783,28 +937,67 @@ async function toggleBusinessActive(id, makeActive) {
   }
 }
 
-async function openAddBusiness() {
-  const name = prompt("Business name");
-  if (!name || !name.trim()) return;
-  const adminUsername = prompt("First admin username (new or existing)");
-  if (!adminUsername || !adminUsername.trim()) return;
-  const adminPassword = prompt("Admin password (required for new users; ignored if user exists)");
-  const adminPin = prompt("Optional starter PIN for new admin (4–6 digits)") || "";
+function openAddBusiness() {
+  const form = document.getElementById("business-form");
+  if (!form) return;
+  form.reset();
+  showModal("business-modal");
+  document.getElementById("business-name")?.focus();
+}
+
+async function saveBusiness(e) {
+  e.preventDefault();
+  const name = document.getElementById("business-name")?.value.trim() || "";
+  const adminUsername =
+    document.getElementById("business-admin-username")?.value.trim() || "";
+  const adminDisplay =
+    document.getElementById("business-admin-display")?.value.trim() || "";
+  const adminPassword =
+    document.getElementById("business-admin-password")?.value || "";
+  const adminPin =
+    document.getElementById("business-admin-pin")?.value.trim() || "";
+
+  if (!name) {
+    toast("Business name is required", "error");
+    return;
+  }
+  if (!adminUsername) {
+    toast("Admin username is required", "error");
+    return;
+  }
+  if (!adminPassword) {
+    toast("Admin password is required for new users", "error");
+    return;
+  }
+
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  if (submitBtn) submitBtn.disabled = true;
   try {
     await api("/api/platform/businesses", {
       method: "POST",
       body: JSON.stringify({
-        name: name.trim(),
-        admin_username: adminUsername.trim(),
-        admin_password: adminPassword || "ChangeMe1",
-        admin_display_name: adminUsername.trim(),
+        name,
+        admin_username: adminUsername,
+        admin_password: adminPassword,
+        admin_display_name: adminDisplay || adminUsername,
         admin_pin: adminPin || undefined,
       }),
     });
     toast("Business created");
+    hideModal("business-modal");
     loadBusinessesAdmin();
+    try {
+      const me = await api("/api/auth/me");
+      state.memberships = me.memberships || [];
+      window.MEMBERSHIPS = state.memberships;
+      renderBusinessSwitcher(state.memberships, state.currentBusiness?.id);
+    } catch (_) {
+      /* switcher refreshes on next page load */
+    }
   } catch (err) {
     toast(err.message, "error");
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
   }
 }
 
@@ -5529,13 +5722,31 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  document.getElementById("business-switcher")?.addEventListener("change", (e) => {
-    const id = e.target.value;
-    if (!id) return;
-    if (String(state.currentBusiness?.id) === String(id)) return;
+  document.getElementById("business-switcher-trigger")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!document.getElementById("brand-business")?.classList.contains("is-switchable")) {
+      return;
+    }
+    toggleBusinessSwitcher();
+  });
+  document.getElementById("brand-business")?.addEventListener("click", (e) => {
+    const option = e.target.closest("[data-business-id]");
+    if (!option) return;
+    e.stopPropagation();
+    const id = option.getAttribute("data-business-id");
+    closeBusinessSwitcher();
+    if (!id || String(state.currentBusiness?.id) === String(id)) return;
     switchBusiness(id);
   });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#brand-business")) closeBusinessSwitcher();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeBusinessSwitcher();
+  });
+  renderBusinessSwitcher(state.memberships, state.currentBusiness?.id);
   document.getElementById("btn-add-business")?.addEventListener("click", openAddBusiness);
+  document.getElementById("business-form")?.addEventListener("submit", saveBusiness);
   document.getElementById("btn-activity-refresh")?.addEventListener("click", loadActivityLogs);
   document.getElementById("activity-from")?.addEventListener("change", loadActivityLogs);
   document.getElementById("activity-to")?.addEventListener("change", loadActivityLogs);
