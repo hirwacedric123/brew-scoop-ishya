@@ -567,15 +567,18 @@ function switchAdminTab(tabId) {
   });
   const teamPanel = document.getElementById("admin-panel-team");
   const categoriesPanel = document.getElementById("admin-panel-categories");
+  const activityPanel = document.getElementById("admin-panel-activity");
   const businessesPanel = document.getElementById("admin-panel-businesses");
   const attendancePanel = document.getElementById("admin-panel-attendance");
   if (teamPanel) teamPanel.hidden = tabId !== "team";
   if (categoriesPanel) categoriesPanel.hidden = tabId !== "categories";
+  if (activityPanel) activityPanel.hidden = tabId !== "activity";
   if (businessesPanel) businessesPanel.hidden = tabId !== "businesses";
   if (attendancePanel) attendancePanel.hidden = tabId !== "attendance";
 
   if (tabId === "team") loadUsers();
   if (tabId === "categories") loadCategoriesAdmin();
+  if (tabId === "activity") loadActivityLogs();
   if (tabId === "businesses") loadBusinessesAdmin();
   if (tabId === "attendance") loadAttendance();
 }
@@ -583,13 +586,135 @@ function switchAdminTab(tabId) {
 function loadAdminView() {
   const role = state.currentUser?.role;
   const isPlatform = !!state.currentUser?.is_platform_admin;
-  if (!state.currentUser || (role !== "admin" && role !== "supervisor" && !isPlatform)) {
+  if (
+    !state.currentUser ||
+    (role !== "admin" &&
+      role !== "supervisor" &&
+      role !== "stock_manager" &&
+      !isPlatform)
+  ) {
     return;
   }
-  const defaultTab = role === "admin" ? "team" : isPlatform ? "businesses" : "attendance";
+  const defaultTab =
+    role === "admin" ? "team" : role === "stock_manager" ? "activity" : isPlatform ? "businesses" : "attendance";
   const activeTab =
     document.querySelector(".admin-tab.active")?.dataset.adminTab || defaultTab;
   switchAdminTab(activeTab);
+}
+
+function formatActivityDetails(details) {
+  if (!details || typeof details !== "object") return "—";
+  const parts = [];
+  if (details.name) parts.push(details.name);
+  if (details.display_name) parts.push(details.display_name);
+  if (details.username) parts.push(`@${details.username}`);
+  if (details.role) parts.push(String(details.role).replace(/_/g, " "));
+  if (details.quantity_added != null) parts.push(`+${details.quantity_added}`);
+  if (details.from_quantity != null && details.to_quantity != null) {
+    parts.push(`${details.from_quantity} → ${details.to_quantity}`);
+  }
+  if (details.total_amount != null) parts.push(fmt.format(details.total_amount));
+  if (details.payment_method) parts.push(String(details.payment_method).toUpperCase());
+  if (details.table_name) parts.push(details.table_name);
+  if (details.business_name) parts.push(details.business_name);
+  if (details.to_business_id && details.from_business_id) {
+    parts.push(`biz ${details.from_business_id} → ${details.to_business_id}`);
+  }
+  if (!parts.length) {
+    return Object.entries(details)
+      .slice(0, 4)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join(" · ");
+  }
+  return parts.join(" · ");
+}
+
+async function loadActivityLogs() {
+  const tbody = document.getElementById("activity-logs-table-body");
+  if (!tbody) return;
+  showTableSkeleton("activity-logs-table-body", 4, 6);
+
+  const params = new URLSearchParams();
+  const from = document.getElementById("activity-from")?.value;
+  const to = document.getElementById("activity-to")?.value;
+  const action = document.getElementById("activity-action-filter")?.value;
+  const userId = document.getElementById("activity-user-filter")?.value;
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  if (action) params.set("action", action);
+  if (userId) params.set("user_id", userId);
+  params.set("limit", "150");
+
+  try {
+    const data = await api(`/api/activity-logs?${params}`);
+    const label = document.getElementById("activity-log-business-label");
+    if (label && data.business) {
+      label.innerHTML = `Users, actions, and timestamps for <strong>${esc(data.business.name)}</strong>`;
+    }
+
+    const actionFilter = document.getElementById("activity-action-filter");
+    if (actionFilter && actionFilter.options.length <= 1 && data.actions?.length) {
+      const current = actionFilter.value;
+      actionFilter.innerHTML =
+        `<option value="">All actions</option>` +
+        data.actions
+          .map((a) => `<option value="${escAttr(a.value)}">${esc(a.label)}</option>`)
+          .join("");
+      if (current) actionFilter.value = current;
+    }
+
+    const userFilter = document.getElementById("activity-user-filter");
+    if (userFilter && state.users?.length) {
+      const current = userFilter.value;
+      userFilter.innerHTML =
+        `<option value="">All users</option>` +
+        state.users
+          .map(
+            (u) =>
+              `<option value="${u.id}">${esc(u.display_name || u.username)}</option>`
+          )
+          .join("");
+      if (current) userFilter.value = current;
+    } else if (userFilter && !state.users?.length) {
+      try {
+        state.users = await api("/api/admin/users");
+        const current = userFilter.value;
+        userFilter.innerHTML =
+          `<option value="">All users</option>` +
+          state.users
+            .map(
+              (u) =>
+                `<option value="${u.id}">${esc(u.display_name || u.username)}</option>`
+            )
+            .join("");
+        if (current) userFilter.value = current;
+      } catch (_) {
+        /* supervisors may lack user list; keep All users */
+      }
+    }
+
+    const logs = data.logs || [];
+    if (!logs.length) {
+      tbody.innerHTML = `<tr><td colspan="4">${emptyState(UI_ICONS.clock, "No activity yet", "Actions for this business will appear here.")}</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = logs
+      .map(
+        (log) => `
+      <tr>
+        <td>
+          <strong>${esc(formatDate(log.created_at))}</strong>
+        </td>
+        <td>${esc(log.user_name || "System")}</td>
+        <td><span class="badge badge-category">${esc(log.action_label || log.action)}</span></td>
+        <td class="text-muted">${esc(formatActivityDetails(log.details))}</td>
+      </tr>`
+      )
+      .join("");
+  } catch (err) {
+    toast(err.message, "error");
+    tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${esc(err.message)}</td></tr>`;
+  }
 }
 
 async function switchBusiness(businessId) {
@@ -5411,6 +5536,11 @@ document.addEventListener("DOMContentLoaded", () => {
     switchBusiness(id);
   });
   document.getElementById("btn-add-business")?.addEventListener("click", openAddBusiness);
+  document.getElementById("btn-activity-refresh")?.addEventListener("click", loadActivityLogs);
+  document.getElementById("activity-from")?.addEventListener("change", loadActivityLogs);
+  document.getElementById("activity-to")?.addEventListener("change", loadActivityLogs);
+  document.getElementById("activity-action-filter")?.addEventListener("change", loadActivityLogs);
+  document.getElementById("activity-user-filter")?.addEventListener("change", loadActivityLogs);
 });
 
 function debounce(fn, ms) {

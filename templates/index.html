@@ -86,6 +86,11 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="17 11 19 13 23 9"/></svg>
           <span>Attendance</span>
         </button>
+        {% elif current_user.role == 'stock_manager' %}
+        <button class="nav-item" data-view="admin">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <span>Activity</span>
+        </button>
         {% endif %}
       </nav>
 
@@ -1205,7 +1210,7 @@
       </section>
 
       <!-- Admin / Supervision -->
-      {% if current_user.role in ['admin', 'supervisor'] %}
+      {% if current_user.role in ['admin', 'supervisor', 'stock_manager'] or current_user.is_platform_admin %}
       <section id="view-admin" class="view">
         <header class="topbar">
           <div class="topbar-heading">
@@ -1213,11 +1218,15 @@
               {% if current_user.role == 'admin' %}
               <p class="page-eyebrow page-eyebrow-danger">Settings</p>
               <h2>Administration</h2>
-              <p>Manage team members and product categories</p>
+              <p>Manage team, categories, and activity</p>
+              {% elif current_user.role == 'stock_manager' %}
+              <p class="page-eyebrow page-eyebrow-danger">Oversight</p>
+              <h2>Activity</h2>
+              <p>Review who did what, and when</p>
               {% else %}
               <p class="page-eyebrow page-eyebrow-danger">Oversight</p>
               <h2>Supervision</h2>
-              <p>Monitor staff attendance and active sessions</p>
+              <p>Monitor staff attendance, sessions, and activity</p>
               {% endif %}
             </div>
           </div>
@@ -1228,10 +1237,15 @@
           <button type="button" class="admin-tab active" data-admin-tab="team">Team</button>
           <button type="button" class="admin-tab" data-admin-tab="categories">Categories</button>
           {% endif %}
+          {% if current_user.role in ['admin', 'supervisor', 'stock_manager'] or current_user.is_platform_admin %}
+          <button type="button" class="admin-tab{% if current_user.role == 'stock_manager' %} active{% endif %}" data-admin-tab="activity">Activity Log</button>
+          {% endif %}
           {% if current_user.is_platform_admin %}
           <button type="button" class="admin-tab" data-admin-tab="businesses">Businesses</button>
           {% endif %}
-          <button type="button" class="admin-tab{% if current_user.role != 'admin' and not current_user.is_platform_admin %} active{% endif %}" data-admin-tab="attendance">Attendance</button>
+          {% if current_user.role in ['admin', 'supervisor'] or current_user.is_platform_admin %}
+          <button type="button" class="admin-tab{% if current_user.role == 'supervisor' and not current_user.is_platform_admin %} active{% endif %}" data-admin-tab="attendance">Attendance</button>
+          {% endif %}
         </div>
 
         {% if current_user.role == 'admin' %}
@@ -1287,6 +1301,44 @@
         </div>
         {% endif %}
 
+        {% if current_user.role in ['admin', 'supervisor', 'stock_manager'] or current_user.is_platform_admin %}
+        <div id="admin-panel-activity" class="admin-panel{% if current_user.role == 'stock_manager' %} active{% endif %}"{% if current_user.role != 'stock_manager' %} hidden{% endif %}>
+          <div class="admin-panel-header">
+            <div>
+              <h3>Activity Log</h3>
+              <p class="text-muted admin-panel-desc" id="activity-log-business-label">
+                Users, actions, and timestamps for
+                <strong>{{ current_business.name if current_business else 'this business' }}</strong>
+              </p>
+            </div>
+            <div class="attendance-filters">
+              <input type="date" id="activity-from" aria-label="From date">
+              <input type="date" id="activity-to" aria-label="To date">
+              <select id="activity-action-filter" aria-label="Filter by action">
+                <option value="">All actions</option>
+              </select>
+              <select id="activity-user-filter" aria-label="Filter by user">
+                <option value="">All users</option>
+              </select>
+              <button type="button" class="btn btn-primary btn-sm" id="btn-activity-refresh">Refresh</button>
+            </div>
+          </div>
+          <div class="table-wrap table-premium">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>User</th>
+                  <th>Action</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody id="activity-logs-table-body"></tbody>
+            </table>
+          </div>
+        </div>
+        {% endif %}
+
         {% if current_user.is_platform_admin %}
         <div id="admin-panel-businesses" class="admin-panel" hidden>
           <div class="admin-panel-header">
@@ -1316,7 +1368,8 @@
         </div>
         {% endif %}
 
-        <div id="admin-panel-attendance" class="admin-panel{% if current_user.role != 'admin' and not current_user.is_platform_admin %} active{% endif %}"{% if current_user.role == 'admin' or current_user.is_platform_admin %} hidden{% endif %}>
+        {% if current_user.role in ['admin', 'supervisor'] or current_user.is_platform_admin %}
+        <div id="admin-panel-attendance" class="admin-panel{% if current_user.role == 'supervisor' and not current_user.is_platform_admin %} active{% endif %}"{% if current_user.role != 'supervisor' or current_user.is_platform_admin %} hidden{% endif %}>
           <div class="admin-panel-header">
             <div>
               <h3>Attendance</h3>
@@ -1348,6 +1401,7 @@
             </table>
           </div>
         </div>
+        {% endif %}
       </section>
       {% endif %}
 
