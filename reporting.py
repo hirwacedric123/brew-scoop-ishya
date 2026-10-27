@@ -71,6 +71,17 @@ def _sale_user_clause(user_id, alias=""):
     return f" AND {prefix}user_id = ?", [uid]
 
 
+def _sale_business_clause(business_id, alias=""):
+    if business_id is None:
+        return "", []
+    try:
+        biz_id = int(business_id)
+    except (TypeError, ValueError):
+        return "", []
+    prefix = f"{alias}." if alias else ""
+    return f" AND {prefix}business_id = ?", [biz_id]
+
+
 NOT_VOIDED = " AND voided_at IS NULL"
 NOT_VOIDED_T = " AND t.voided_at IS NULL"
 
@@ -89,8 +100,9 @@ def _profit_metrics(revenue, cogs):
     }
 
 
-def sales_summary(db, date_from, date_to, user_id=None):
+def sales_summary(db, date_from, date_to, user_id=None, business_id=None):
     user_clause, user_params = _sale_user_clause(user_id)
+    biz_clause, biz_params = _sale_business_clause(business_id)
     row = db.execute(
         f"""SELECT COALESCE(SUM(total_amount), 0) AS revenue,
                   COALESCE(SUM(COALESCE(cost_price, 0) * quantity), 0) AS cogs,
@@ -99,8 +111,8 @@ def sales_summary(db, date_from, date_to, user_id=None):
            FROM transactions
            WHERE type = 'sale'{NOT_VOIDED}
              AND substr(created_at, 1, 10) >= ?
-             AND substr(created_at, 1, 10) <= ?{user_clause}""",
-        (date_from, date_to, *user_params),
+             AND substr(created_at, 1, 10) <= ?{user_clause}{biz_clause}""",
+        (date_from, date_to, *user_params, *biz_params),
     ).fetchone()
     metrics = _profit_metrics(row["revenue"], row["cogs"])
     return {
@@ -111,8 +123,9 @@ def sales_summary(db, date_from, date_to, user_id=None):
     }
 
 
-def payment_breakdown(db, date_from, date_to, user_id=None):
+def payment_breakdown(db, date_from, date_to, user_id=None, business_id=None):
     user_clause, user_params = _sale_user_clause(user_id)
+    biz_clause, biz_params = _sale_business_clause(business_id)
     rows = db.execute(
         f"""SELECT payment_method,
                   COALESCE(SUM(total_amount), 0) AS revenue,
@@ -121,9 +134,9 @@ def payment_breakdown(db, date_from, date_to, user_id=None):
            WHERE type = 'sale'{NOT_VOIDED}
              AND payment_method IS NOT NULL
              AND substr(created_at, 1, 10) >= ?
-             AND substr(created_at, 1, 10) <= ?{user_clause}
+             AND substr(created_at, 1, 10) <= ?{user_clause}{biz_clause}
            GROUP BY payment_method""",
-        (date_from, date_to, *user_params),
+        (date_from, date_to, *user_params, *biz_params),
     ).fetchall()
     totals = {row["payment_method"]: row for row in rows}
     return [
@@ -137,8 +150,9 @@ def payment_breakdown(db, date_from, date_to, user_id=None):
     ]
 
 
-def category_breakdown(db, date_from, date_to, user_id=None):
+def category_breakdown(db, date_from, date_to, user_id=None, business_id=None):
     user_clause, user_params = _sale_user_clause(user_id, "t")
+    biz_clause, biz_params = _sale_business_clause(business_id, "t")
     rows = db.execute(
         f"""SELECT p.category,
                   COALESCE(SUM(t.total_amount), 0) AS revenue,
@@ -148,10 +162,10 @@ def category_breakdown(db, date_from, date_to, user_id=None):
            JOIN products p ON p.id = t.product_id
            WHERE t.type = 'sale'{NOT_VOIDED_T}
              AND substr(t.created_at, 1, 10) >= ?
-             AND substr(t.created_at, 1, 10) <= ?{user_clause}
+             AND substr(t.created_at, 1, 10) <= ?{user_clause}{biz_clause}
            GROUP BY p.category
            ORDER BY revenue DESC, p.category COLLATE NOCASE ASC""",
-        (date_from, date_to, *user_params),
+        (date_from, date_to, *user_params, *biz_params),
     ).fetchall()
     return [
         {
@@ -164,7 +178,21 @@ def category_breakdown(db, date_from, date_to, user_id=None):
     ]
 
 
-def seller_breakdown(db, report_date):
+def seller_breakdown(db, report_date, business_id=None):
+    biz_clause, biz_params = _sale_business_clause(business_id, "t")
+    membership_join = ""
+    membership_where = "u.role = 'seller' AND u.is_active = 1"
+    membership_params = []
+    if business_id is not None:
+        membership_join = """
+           JOIN user_business_memberships m
+             ON m.user_id = u.id
+            AND m.business_id = ?
+            AND m.role = 'seller'
+            AND m.is_active = 1
+        """
+        membership_where = "u.is_active = 1"
+        membership_params = [business_id]
     rows = db.execute(
         f"""SELECT u.id,
                   u.display_name,
@@ -172,15 +200,16 @@ def seller_breakdown(db, report_date):
                   COALESCE(SUM(t.quantity), 0) AS units,
                   COUNT(t.id) AS transactions
            FROM users u
+           {membership_join}
            LEFT JOIN transactions t
              ON t.user_id = u.id
             AND t.type = 'sale'{NOT_VOIDED_T}
             AND substr(t.created_at, 1, 10) = ?
-           WHERE u.role = 'seller'
-             AND u.is_active = 1
+            {biz_clause}
+           WHERE {membership_where}
            GROUP BY u.id
            ORDER BY revenue DESC, u.display_name COLLATE NOCASE ASC""",
-        (report_date,),
+        (*membership_params, report_date, *biz_params),
     ).fetchall()
     return [
         {
@@ -194,8 +223,9 @@ def seller_breakdown(db, report_date):
     ]
 
 
-def top_products_for_day(db, report_date, limit=5, user_id=None):
+def top_products_for_day(db, report_date, limit=5, user_id=None, business_id=None):
     user_clause, user_params = _sale_user_clause(user_id, "t")
+    biz_clause, biz_params = _sale_business_clause(business_id, "t")
     rows = db.execute(
         f"""SELECT p.name,
                   COALESCE(SUM(t.quantity), 0) AS units,
@@ -203,11 +233,11 @@ def top_products_for_day(db, report_date, limit=5, user_id=None):
            FROM transactions t
            JOIN products p ON p.id = t.product_id
            WHERE t.type = 'sale'{NOT_VOIDED_T}
-             AND substr(t.created_at, 1, 10) = ?{user_clause}
+             AND substr(t.created_at, 1, 10) = ?{user_clause}{biz_clause}
            GROUP BY p.id
            ORDER BY units DESC, revenue DESC
            LIMIT ?""",
-        (report_date, *user_params, limit),
+        (report_date, *user_params, *biz_params, limit),
     ).fetchall()
     return [
         {
@@ -219,15 +249,31 @@ def top_products_for_day(db, report_date, limit=5, user_id=None):
     ]
 
 
-def low_stock_items(db, limit=8):
+def low_stock_items(db, limit=8, business_id=None):
+    if business_id is None:
+        cats = db.execute("SELECT name, uses_cup_stock FROM categories").fetchall()
+        cup = db.execute(
+            "SELECT quantity, reorder_level FROM cup_inventory LIMIT 1"
+        ).fetchone()
+        products = db.execute("SELECT * FROM products").fetchall()
+    else:
+        cats = db.execute(
+            "SELECT name, uses_cup_stock FROM categories WHERE business_id = ?",
+            (business_id,),
+        ).fetchall()
+        cup = db.execute(
+            "SELECT quantity, reorder_level FROM cup_inventory WHERE business_id = ?",
+            (business_id,),
+        ).fetchone()
+        products = db.execute(
+            "SELECT * FROM products WHERE business_id = ?", (business_id,)
+        ).fetchall()
     category_cup_map = {
-        row["name"]: bool(row["uses_cup_stock"])
-        for row in db.execute("SELECT name, uses_cup_stock FROM categories").fetchall()
+        row["name"]: bool(row["uses_cup_stock"]) for row in cats
     }
-    cup = db.execute("SELECT quantity, reorder_level FROM cup_inventory WHERE id = 1").fetchone()
     items = []
 
-    for row in db.execute("SELECT name, category, quantity, reorder_level FROM products").fetchall():
+    for row in products:
         if category_cup_map.get(row["category"], False):
             continue
         qty = row["quantity"]
@@ -301,12 +347,18 @@ def extra_report_emails():
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-def build_admin_daily_report(db, report_date):
+def build_admin_daily_report(db, report_date, business_id=None):
     return {
         "report_date": report_date,
-        "summary": sales_summary(db, report_date, report_date),
-        "payments": payment_breakdown(db, report_date, report_date),
-        "categories": category_breakdown(db, report_date, report_date),
+        "summary": sales_summary(
+            db, report_date, report_date, business_id=business_id
+        ),
+        "payments": payment_breakdown(
+            db, report_date, report_date, business_id=business_id
+        ),
+        "categories": category_breakdown(
+            db, report_date, report_date, business_id=business_id
+        ),
         "sellers": seller_breakdown(db, report_date),
         "top_products": top_products_for_day(db, report_date),
         "low_stock": low_stock_items(db),
