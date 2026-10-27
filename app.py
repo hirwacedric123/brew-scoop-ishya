@@ -40,6 +40,13 @@ from auth import (
     verify_password,
     verify_admin_password,
 )
+from activity import (
+    ACTION_LABELS,
+    action_label,
+    init_activity_logs_table,
+    list_activity_logs,
+    log_activity,
+)
 from business import (
     create_business,
     current_business_id,
@@ -467,6 +474,7 @@ def _ensure_business_id_column(db, table):
 
 def _migrate_business_tenancy(db):
     init_business_tables(db)
+    init_activity_logs_table(db)
 
     user_cols = _table_columns(db, "users")
     if "is_platform_admin" not in user_cols:
@@ -1452,6 +1460,16 @@ def auth_login():
     row = get_user_by_id(db, selected_id)
     login_user(row["id"], selected_business_id)
     _start_seller_session(db, row["id"])
+    log_activity(
+        db,
+        action="login",
+        business_id=selected_business_id,
+        user_id=row["id"],
+        entity_type="user",
+        entity_id=row["id"],
+        details={"display_name": row["display_name"]},
+    )
+    db.commit()
     return jsonify(_session_auth_payload(db, row))
 
 
@@ -1486,6 +1504,20 @@ def auth_switch_business():
             }), 400
 
     set_session_business(business_id)
+    log_activity(
+        db,
+        action="switch_business",
+        business_id=business_id,
+        user_id=user["id"],
+        entity_type="business",
+        entity_id=business_id,
+        details={
+            "from_business_id": current_biz,
+            "to_business_id": business_id,
+            "business_name": biz["name"],
+        },
+    )
+    db.commit()
     return jsonify(_session_auth_payload(db, user))
 
 
@@ -1594,8 +1626,21 @@ def auth_reset_password():
 
 @app.route("/api/auth/logout", methods=["POST"])
 def auth_logout():
+    db = get_db()
+    user_id = session.get("user_id")
+    biz_id = current_business_id()
     session_id = session.get("seller_session_id")
-    _end_seller_session(get_db(), session_id, "manual")
+    if user_id:
+        log_activity(
+            db,
+            action="logout",
+            business_id=biz_id,
+            user_id=user_id,
+            entity_type="user",
+            entity_id=user_id,
+        )
+        db.commit()
+    _end_seller_session(db, session_id, "manual")
     logout_user()
     return jsonify({"message": "Logged out"})
 
@@ -1837,6 +1882,18 @@ def admin_create_user():
         ),
     )
     upsert_membership(db, cur.lastrowid, biz_id, role, True, ts)
+    log_activity(
+        db,
+        action="user.create",
+        business_id=biz_id,
+        entity_type="user",
+        entity_id=cur.lastrowid,
+        details={
+            "username": data["username"].strip(),
+            "role": role,
+            "display_name": (data.get("display_name") or data["username"]).strip(),
+        },
+    )
     db.commit()
     row = get_db().execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone()
     return jsonify(row_to_user(row, membership_role=role)), 201
@@ -1917,6 +1974,18 @@ def admin_update_user(user_id):
         (display_name, email, role, is_active, password_hash, pin, ts, user_id),
     )
     upsert_membership(db, user_id, biz_id, role, bool(is_active), ts)
+    log_activity(
+        db,
+        action="user.update",
+        business_id=biz_id,
+        entity_type="user",
+        entity_id=user_id,
+        details={
+            "display_name": display_name,
+            "role": role,
+            "is_active": bool(is_active),
+        },
+    )
     db.commit()
     updated = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     return jsonify(row_to_user(updated, membership_role=role))
@@ -1943,10 +2012,26 @@ def admin_delete_user(user_id):
            WHERE user_id = ? AND business_id != ? LIMIT 1""",
         (user_id, biz_id),
     ).fetchone()
+    target = get_user_by_id(db, user_id)
+    target_name = target["display_name"] if target else str(user_id)
+    target_username = target["username"] if target else None
+
     if other:
         db.execute(
             "DELETE FROM user_business_memberships WHERE user_id = ? AND business_id = ?",
             (user_id, biz_id),
+        )
+        log_activity(
+            db,
+            action="user.delete",
+            business_id=biz_id,
+            entity_type="user",
+            entity_id=user_id,
+            details={
+                "display_name": target_name,
+                "username": target_username,
+                "removed_membership_only": True,
+            },
         )
         db.commit()
         return jsonify({"message": "User removed from this business"})
@@ -1999,6 +2084,18 @@ def admin_delete_user(user_id):
     db.execute("UPDATE transactions SET user_id = NULL WHERE user_id = ?", (user_id,))
     db.execute("UPDATE transactions SET voided_by = NULL WHERE voided_by = ?", (user_id,))
     db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    log_activity(
+        db,
+        action="user.delete",
+        business_id=biz_id,
+        entity_type="user",
+        entity_id=user_id,
+        details={
+            "display_name": target_name,
+            "username": target_username,
+            "removed_membership_only": False,
+        },
+    )
     db.commit()
     return jsonify({"message": "User deleted"})
 
@@ -2112,6 +2209,20 @@ def create_product():
                 ts,
             ),
         )
+    log_activity(
+        db,
+        action="product.create",
+        business_id=biz_id,
+        entity_type="product",
+        entity_id=cur.lastrowid,
+        details={
+            "name": data["name"].strip(),
+            "category": category,
+            "price": float(data["price"]),
+            "cost_price": cost_price,
+            "quantity": quantity,
+        },
+    )
     db.commit()
     row = db.execute("SELECT * FROM products WHERE id = ?", (cur.lastrowid,)).fetchone()
     category_cup_map = get_category_cup_map(db)
@@ -2189,6 +2300,20 @@ def update_product(product_id):
             ),
         )
 
+    log_activity(
+        db,
+        action="product.update",
+        business_id=biz_id,
+        entity_type="product",
+        entity_id=product_id,
+        details={
+            "name": data["name"].strip(),
+            "category": category,
+            "price": float(data["price"]),
+            "cost_price": cost_price,
+            "quantity": new_quantity,
+        },
+    )
     db.commit()
     updated = db.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
     category_cup_map = get_category_cup_map(db)
@@ -2204,7 +2329,7 @@ def delete_product(product_id):
     if err:
         return err
     row = db.execute(
-        "SELECT id FROM products WHERE id = ? AND business_id = ?",
+        "SELECT id, name FROM products WHERE id = ? AND business_id = ?",
         (product_id, biz_id),
     ).fetchone()
     if not row:
@@ -2212,6 +2337,14 @@ def delete_product(product_id):
     db.execute(
         "DELETE FROM products WHERE id = ? AND business_id = ?",
         (product_id, biz_id),
+    )
+    log_activity(
+        db,
+        action="product.delete",
+        business_id=biz_id,
+        entity_type="product",
+        entity_id=product_id,
+        details={"name": row["name"]},
     )
     db.commit()
     return jsonify({"message": "Product deleted"})
@@ -2419,6 +2552,23 @@ def _execute_checkout(
                 (biz_id, -cup_units_needed, notes_text, checkout_ref, ts),
             )
 
+        log_activity(
+            db,
+            action="sale.checkout",
+            business_id=biz_id,
+            user_id=user_id,
+            entity_type="checkout",
+            entity_id=checkout_ref,
+            details={
+                "total_amount": round(total_amount, 2),
+                "units": total_units,
+                "payment_method": method,
+                "table_id": table_id,
+                "table_name": table_row["name"],
+                "item_count": len(result_items),
+            },
+            created_at=ts,
+        )
         db.commit()
         return {
             "checkout_ref": checkout_ref,
@@ -2656,6 +2806,14 @@ def settle_credit_sale():
            WHERE type = 'sale' AND checkout_ref = ? AND voided_at IS NULL""",
         (ts, method, user["id"], checkout_ref),
     )
+    log_activity(
+        db,
+        action="sale.settle_credit",
+        entity_type="checkout",
+        entity_id=checkout_ref,
+        details={"settled_method": method},
+        created_at=ts,
+    )
     db.commit()
 
     updated = db.execute(
@@ -2746,6 +2904,15 @@ def _execute_void_sale(db, checkout_ref, voided_by_user_id):
             """UPDATE transactions SET voided_at = ?, voided_by = ?
                WHERE type = 'sale' AND checkout_ref = ? AND voided_at IS NULL""",
             (ts, voided_by_user_id, checkout_ref),
+        )
+        log_activity(
+            db,
+            action="sale.void",
+            user_id=voided_by_user_id,
+            entity_type="checkout",
+            entity_id=checkout_ref,
+            details={"lines_voided": len(rows)},
+            created_at=ts,
         )
         db.commit()
         return {
@@ -3228,6 +3395,15 @@ def seller_shift_start():
                 f"Joined the open shift{f' with {lead}' if lead else ''}. "
                 "You can sell — a floor supervisor will close & reconcile."
             )
+        log_activity(
+            db,
+            action="shift.join",
+            entity_type="shift",
+            entity_id=store_shift["id"],
+            details={"role_on_shift": my_role},
+            created_at=ts,
+        )
+        db.commit()
         return jsonify({
             "has_open_shift": True,
             "can_close": shift_data["can_close"],
@@ -3248,6 +3424,15 @@ def seller_shift_start():
     )
     shift_id = cur.lastrowid
     _add_shift_member(db, shift_id, user["id"], my_role, ts)
+    log_activity(
+        db,
+        action="shift.start",
+        business_id=biz_id,
+        entity_type="shift",
+        entity_id=shift_id,
+        details={"role_on_shift": my_role},
+        created_at=ts,
+    )
     db.commit()
     row = db.execute(
         "SELECT * FROM seller_shifts WHERE id = ?",
@@ -3414,6 +3599,18 @@ def seller_shift_close():
            WHERE shift_id = ? AND left_at IS NULL""",
         (ts, shift["id"]),
     )
+    log_activity(
+        db,
+        action="shift.close",
+        entity_type="shift",
+        entity_id=shift["id"],
+        details={
+            "total_sales": sales["total_sales"],
+            "cash_variance": cash_variance,
+            "units_sold": sales["units_sold"],
+        },
+        created_at=ts,
+    )
     db.commit()
     row = db.execute(
         "SELECT * FROM seller_shifts WHERE id = ?",
@@ -3501,6 +3698,20 @@ def restock_product():
             ts,
         ),
     )
+    log_activity(
+        db,
+        action="restock",
+        business_id=biz_id,
+        entity_type="product",
+        entity_id=product_id,
+        details={
+            "name": row["name"],
+            "quantity_added": quantity,
+            "unit_cost": unit_price,
+            "new_quantity": new_qty,
+        },
+        created_at=ts,
+    )
     db.commit()
 
     updated = db.execute(
@@ -3566,6 +3777,20 @@ def adjust_stock():
             ts,
         ),
     )
+    log_activity(
+        db,
+        action="stock.adjust",
+        business_id=biz_id,
+        entity_type="product",
+        entity_id=product_id,
+        details={
+            "name": row["name"],
+            "from_quantity": row["quantity"],
+            "to_quantity": new_quantity,
+            "diff": diff,
+        },
+        created_at=ts,
+    )
     db.commit()
 
     updated = db.execute(
@@ -3610,6 +3835,15 @@ def restock_cups():
            VALUES (?, 'restock', ?, ?, ?)""",
         (biz_id, quantity, (data.get("notes") or "Cup replenishment").strip(), ts),
     )
+    log_activity(
+        db,
+        action="cups.restock",
+        business_id=biz_id,
+        entity_type="cups",
+        entity_id=biz_id,
+        details={"quantity_added": quantity, "new_quantity": new_qty},
+        created_at=ts,
+    )
     db.commit()
     return jsonify(row_to_cup_inventory(get_cup_inventory(db, biz_id)))
 
@@ -3640,6 +3874,19 @@ def adjust_cups():
         """INSERT INTO cup_transactions (business_id, type, quantity, notes, created_at)
            VALUES (?, 'adjustment', ?, ?, ?)""",
         (biz_id, diff, (data.get("notes") or "Cup stock correction").strip(), ts),
+    )
+    log_activity(
+        db,
+        action="cups.adjust",
+        business_id=biz_id,
+        entity_type="cups",
+        entity_id=biz_id,
+        details={
+            "from_quantity": cup_inv["quantity"],
+            "to_quantity": new_quantity,
+            "diff": diff,
+        },
+        created_at=ts,
     )
     db.commit()
     return jsonify(row_to_cup_inventory(get_cup_inventory(db, biz_id)))
@@ -4307,6 +4554,15 @@ def admin_create_category():
            VALUES (?, ?, ?, ?, ?)""",
         (biz_id, name, max_order + 1, uses_cup_stock, ts),
     )
+    log_activity(
+        db,
+        action="category.create",
+        business_id=biz_id,
+        entity_type="category",
+        entity_id=cur.lastrowid,
+        details={"name": name, "uses_cup_stock": bool(uses_cup_stock)},
+        created_at=ts,
+    )
     db.commit()
     row = db.execute(
         """SELECT c.id, c.name, c.sort_order, c.created_at, c.uses_cup_stock, 0 AS product_count
@@ -4320,7 +4576,13 @@ def admin_create_category():
 @admin_required
 def admin_update_category(category_id):
     db = get_db()
-    row = db.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    row = db.execute(
+        "SELECT * FROM categories WHERE id = ? AND business_id = ?",
+        (category_id, biz_id),
+    ).fetchone()
     if not row:
         return jsonify({"error": "Category not found"}), 404
 
@@ -4332,8 +4594,9 @@ def admin_update_category(category_id):
         return jsonify({"error": "Category name is too long"}), 400
 
     duplicate = db.execute(
-        "SELECT id FROM categories WHERE name = ? COLLATE NOCASE AND id != ?",
-        (name, category_id),
+        """SELECT id FROM categories
+           WHERE business_id = ? AND name = ? COLLATE NOCASE AND id != ?""",
+        (biz_id, name, category_id),
     ).fetchone()
     if duplicate:
         return jsonify({"error": "Category already exists"}), 409
@@ -4346,26 +4609,42 @@ def admin_update_category(category_id):
         default = next(c for c in DEFAULT_CATEGORIES if c["name"].casefold() == old_name.casefold())
         uses_cup_stock = default["uses_cup_stock"]
     if name != old_name:
-        db.execute("UPDATE products SET category = ? WHERE category = ?", (name, old_name))
+        db.execute(
+            "UPDATE products SET category = ? WHERE category = ? AND business_id = ?",
+            (name, old_name, biz_id),
+        )
     db.execute(
-        "UPDATE categories SET name = ?, uses_cup_stock = ? WHERE id = ?",
-        (name, uses_cup_stock, category_id),
+        "UPDATE categories SET name = ?, uses_cup_stock = ? WHERE id = ? AND business_id = ?",
+        (name, uses_cup_stock, category_id, biz_id),
     )
     if uses_cup_stock:
         db.execute(
-            "UPDATE products SET quantity = 0 WHERE category = ?",
-            (name,),
+            "UPDATE products SET quantity = 0 WHERE category = ? AND business_id = ?",
+            (name, biz_id),
         )
+    log_activity(
+        db,
+        action="category.update",
+        business_id=biz_id,
+        entity_type="category",
+        entity_id=category_id,
+        details={
+            "name": name,
+            "old_name": old_name,
+            "uses_cup_stock": bool(uses_cup_stock),
+        },
+    )
     db.commit()
 
     updated = db.execute(
         """SELECT c.id, c.name, c.sort_order, c.created_at, c.uses_cup_stock,
                   COUNT(p.id) AS product_count
            FROM categories c
-           LEFT JOIN products p ON p.category = c.name
-           WHERE c.id = ?
+           LEFT JOIN products p
+             ON p.category = c.name AND p.business_id = c.business_id
+           WHERE c.id = ? AND c.business_id = ?
            GROUP BY c.id""",
-        (category_id,),
+        (category_id, biz_id),
     ).fetchone()
     return jsonify(row_to_category(updated))
 
@@ -4374,7 +4653,13 @@ def admin_update_category(category_id):
 @admin_required
 def admin_delete_category(category_id):
     db = get_db()
-    row = db.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    row = db.execute(
+        "SELECT * FROM categories WHERE id = ? AND business_id = ?",
+        (category_id, biz_id),
+    ).fetchone()
     if not row:
         return jsonify({"error": "Category not found"}), 404
 
@@ -4382,14 +4667,27 @@ def admin_delete_category(category_id):
         return jsonify({"error": "Default categories cannot be deleted"}), 400
 
     product_count = db.execute(
-        "SELECT COUNT(*) AS n FROM products WHERE category = ?", (row["name"],)
+        """SELECT COUNT(*) AS n FROM products
+           WHERE category = ? AND business_id = ?""",
+        (row["name"], biz_id),
     ).fetchone()["n"]
     if product_count > 0:
         return jsonify({
             "error": f"Cannot delete — {product_count} product(s) use this category"
         }), 400
 
-    db.execute("DELETE FROM categories WHERE id = ?", (category_id,))
+    db.execute(
+        "DELETE FROM categories WHERE id = ? AND business_id = ?",
+        (category_id, biz_id),
+    )
+    log_activity(
+        db,
+        action="category.delete",
+        business_id=biz_id,
+        entity_type="category",
+        entity_id=category_id,
+        details={"name": row["name"]},
+    )
     db.commit()
     return jsonify({"message": "Category deleted"})
 
@@ -4486,6 +4784,15 @@ def platform_create_business():
             admin_user_id = cur.lastrowid
             upsert_membership(db, admin_user_id, business_id, "admin", True, ts)
 
+    log_activity(
+        db,
+        action="business.create",
+        business_id=business_id,
+        entity_type="business",
+        entity_id=business_id,
+        details={"name": name, "admin_user_id": admin_user_id},
+        created_at=ts,
+    )
     db.commit()
     biz = get_business_by_id(db, business_id)
     return jsonify({
@@ -4518,14 +4825,73 @@ def platform_update_business(business_id):
     from business import unique_business_slug
 
     slug = unique_business_slug(db, name, exclude_id=business_id) if name != row["name"] else row["slug"]
+    ts = now_iso()
     db.execute(
         """UPDATE businesses
            SET name = ?, slug = ?, is_active = ?, updated_at = ?
            WHERE id = ?""",
-        (name, slug, is_active, now_iso(), business_id),
+        (name, slug, is_active, ts, business_id),
+    )
+    log_activity(
+        db,
+        action="business.update",
+        business_id=business_id,
+        entity_type="business",
+        entity_id=business_id,
+        details={"name": name, "is_active": bool(is_active)},
+        created_at=ts,
     )
     db.commit()
     return jsonify(row_to_business(get_business_by_id(db, business_id)))
+
+
+@app.route("/api/activity-logs", methods=["GET"])
+@role_required("admin", "supervisor", "stock_manager")
+def api_list_activity_logs():
+    db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+
+    date_from = request.args.get("from", "").strip() or None
+    date_to = request.args.get("to", "").strip() or None
+    action = request.args.get("action", "").strip() or None
+    user_id = _parse_user_id_filter(request.args.get("user_id", "").strip())
+    try:
+        limit = min(int(request.args.get("limit", 100)), 500)
+    except (TypeError, ValueError):
+        limit = 100
+
+    if date_from and not parse_date(date_from):
+        return jsonify({"error": "Invalid from date"}), 400
+    if date_to and not parse_date(date_to):
+        return jsonify({"error": "Invalid to date"}), 400
+
+    logs = list_activity_logs(
+        db,
+        business_id=biz_id,
+        user_id=user_id,
+        action=action,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+    )
+    business = get_business_by_id(db, biz_id)
+    return jsonify({
+        "business": row_to_business(business) if business else None,
+        "from": date_from,
+        "to": date_to,
+        "action": action,
+        "user_id": user_id,
+        "actions": [
+            {"value": key, "label": label}
+            for key, label in sorted(ACTION_LABELS.items(), key=lambda x: x[1])
+        ],
+        "logs": [
+            {**entry, "action_label": action_label(entry["action"])}
+            for entry in logs
+        ],
+    })
 
 
 with app.app_context():
