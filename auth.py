@@ -24,6 +24,7 @@ def init_users_table(db):
             is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
             must_change_password INTEGER NOT NULL DEFAULT 0 CHECK(must_change_password IN (0, 1)),
             pin TEXT,
+            is_platform_admin INTEGER NOT NULL DEFAULT 0 CHECK(is_platform_admin IN (0, 1)),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -34,15 +35,16 @@ def init_users_table(db):
     )
 
 
-def row_to_user(row):
+def row_to_user(row, membership_role=None):
     keys = row.keys()
     pin_value = (row["pin"] or "").strip() if "pin" in keys else ""
+    role = membership_role if membership_role is not None else row["role"]
     return {
         "id": row["id"],
         "username": row["username"],
         "display_name": row["display_name"],
         "email": (row["email"] or "").strip() if "email" in keys else "",
-        "role": row["role"],
+        "role": role,
         "is_active": bool(row["is_active"]),
         "must_change_password": bool(row["must_change_password"])
         if "must_change_password" in keys
@@ -53,14 +55,17 @@ def row_to_user(row):
         "can_supervise_shift": bool(row["can_supervise_shift"])
         if "can_supervise_shift" in keys
         else False,
+        "is_platform_admin": bool(row["is_platform_admin"])
+        if "is_platform_admin" in keys
+        else False,
         "has_pin": bool(pin_value),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
 
 
-def public_user(row):
-    data = row_to_user(row)
+def public_user(row, membership_role=None):
+    data = row_to_user(row, membership_role=membership_role)
     data.pop("created_at", None)
     data.pop("updated_at", None)
     return data
@@ -111,16 +116,49 @@ def validate_pin(value, *, required=True):
     return None, pin
 
 
-def pin_taken(db, pin, exclude_user_id=None):
-    """Permanent PINs must be unique. Temporary shared starter PINs are allowed."""
-    query = """SELECT id FROM users
-               WHERE pin = ?
-                 AND IFNULL(must_change_pin, 0) = 0"""
-    params = [pin]
+def pin_taken(db, pin, exclude_user_id=None, business_id=None):
+    """Permanent PINs must be unique among active members of the same business."""
+    if business_id is None:
+        from business import current_business_id
+
+        business_id = current_business_id()
+    if business_id is None:
+        query = """SELECT id FROM users
+                   WHERE pin = ?
+                     AND IFNULL(must_change_pin, 0) = 0"""
+        params = [pin]
+        if exclude_user_id is not None:
+            query += " AND id != ?"
+            params.append(exclude_user_id)
+        return db.execute(query, params).fetchone() is not None
+
+    query = """
+        SELECT u.id
+        FROM users u
+        JOIN user_business_memberships m ON m.user_id = u.id
+        WHERE u.pin = ?
+          AND IFNULL(u.must_change_pin, 0) = 0
+          AND m.business_id = ?
+          AND m.is_active = 1
+    """
+    params = [pin, business_id]
     if exclude_user_id is not None:
-        query += " AND id != ?"
+        query += " AND u.id != ?"
         params.append(exclude_user_id)
     return db.execute(query, params).fetchone() is not None
+
+
+def active_membership_role(db, user_id, business_id):
+    if not user_id or not business_id:
+        return None
+    from business import get_membership
+
+    membership = get_membership(db, user_id, business_id)
+    if not membership:
+        return None
+    if not membership["is_active"] or not membership["business_is_active"]:
+        return None
+    return membership["role"]
 
 
 def get_current_user(db):
@@ -131,12 +169,47 @@ def get_current_user(db):
     if not row or not row["is_active"]:
         session.clear()
         return None
+
+    from business import current_business_id, get_membership
+
+    business_id = current_business_id()
+    if business_id is None:
+        # Platform-only session without a shop context is allowed for platform admins.
+        if row_to_user(row).get("is_platform_admin"):
+            return row
+        session.clear()
+        return None
+
+    membership = get_membership(db, user_id, business_id)
+    if not membership or not membership["is_active"] or not membership["business_is_active"]:
+        if row_to_user(row).get("is_platform_admin"):
+            return row
+        session.clear()
+        return None
     return row
 
 
-def login_user(user_id):
+def current_user_role(db, user=None):
+    if user is None:
+        user = get_current_user(db)
+    if user is None:
+        return None
+    from business import current_business_id
+
+    business_id = current_business_id()
+    role = active_membership_role(db, user["id"], business_id)
+    if role:
+        return role
+    if row_to_user(user).get("is_platform_admin"):
+        return "admin"
+    return user["role"]
+
+
+def login_user(user_id, business_id=None):
     session.clear()
     session["user_id"] = user_id
+    if business_id is not None:
+        session["business_id"] = int(business_id)
     session.permanent = True
 
 
@@ -152,11 +225,34 @@ def verify_password(password_hash, password):
     return check_password_hash(password_hash, password)
 
 
-def verify_admin_password(db, password):
+def verify_admin_password(db, password, business_id=None):
     if not password:
         return False
+    from business import current_business_id
+
+    if business_id is None:
+        business_id = current_business_id()
+
+    # Platform admins can always verify.
+    platform_rows = db.execute(
+        """SELECT password_hash FROM users
+           WHERE is_platform_admin = 1 AND is_active = 1"""
+    ).fetchall()
+    if any(verify_password(row["password_hash"], password) for row in platform_rows):
+        return True
+
+    if business_id is None:
+        return False
+
     rows = db.execute(
-        "SELECT password_hash FROM users WHERE role = 'admin' AND is_active = 1"
+        """SELECT u.password_hash
+           FROM users u
+           JOIN user_business_memberships m ON m.user_id = u.id
+           WHERE m.business_id = ?
+             AND m.role = 'admin'
+             AND m.is_active = 1
+             AND u.is_active = 1""",
+        (business_id,),
     ).fetchall()
     return any(verify_password(row["password_hash"], password) for row in rows)
 
@@ -220,6 +316,7 @@ def pin_change_exempt():
         "/api/auth/pin",
         "/api/auth/logout",
         "/api/auth/me",
+        "/api/auth/switch-business",
         "/static/",
     ):
         if path == prefix or path.startswith(prefix):
@@ -293,7 +390,8 @@ def admin_required(view):
     def wrapped(*args, **kwargs):
         from app import get_db
 
-        user = get_current_user(get_db())
+        db = get_db()
+        user = get_current_user(db)
         if user is None:
             return jsonify({"error": "Authentication required"}), 401
         blocked = _block_if_password_change_required(user)
@@ -302,7 +400,9 @@ def admin_required(view):
         blocked = _block_if_pin_change_required(user)
         if blocked is not None:
             return blocked
-        if user["role"] != "admin":
+        if current_user_role(db, user) != "admin" and not row_to_user(user).get(
+            "is_platform_admin"
+        ):
             return jsonify({"error": "Admin access required"}), 403
         return view(*args, **kwargs)
 
@@ -317,7 +417,8 @@ def role_required(*roles):
         def wrapped(*args, **kwargs):
             from app import get_db
 
-            user = get_current_user(get_db())
+            db = get_db()
+            user = get_current_user(db)
             if user is None:
                 if request.path.startswith("/api/"):
                     return jsonify({"error": "Authentication required"}), 401
@@ -328,7 +429,17 @@ def role_required(*roles):
             blocked = _block_if_pin_change_required(user)
             if blocked is not None:
                 return blocked
-            if user["role"] not in allowed:
+            role = current_user_role(db, user)
+            if role not in allowed and not (
+                row_to_user(user).get("is_platform_admin") and "admin" in allowed
+            ):
+                # Platform admins may act as admin in any business context.
+                if row_to_user(user).get("is_platform_admin") and allowed & {
+                    "admin",
+                    "supervisor",
+                    "stock_manager",
+                }:
+                    return view(*args, **kwargs)
                 return jsonify({"error": "Access denied"}), 403
             return view(*args, **kwargs)
 
