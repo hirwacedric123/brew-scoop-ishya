@@ -84,6 +84,13 @@
             <div class="login-account-list" id="login-account-list"></div>
             <button type="button" class="btn btn-ghost btn-block" id="btn-back-to-pin">Back to PIN</button>
           </div>
+
+          <div class="login-account-pick" id="login-business-pick" hidden>
+            <div class="pin-pad-header">Choose a business</div>
+            <p class="login-subtitle" id="login-business-subtitle">Select which business to open.</p>
+            <div class="login-account-list" id="login-business-list"></div>
+            <button type="button" class="btn btn-ghost btn-block" id="btn-back-to-account">Back</button>
+          </div>
           {% endif %}
         </div>
       </div>
@@ -97,6 +104,8 @@
     let pinValue = "";
     let submitting = false;
     let pendingPin = "";
+    let pendingUserId = null;
+    let pendingCandidates = [];
 
     function toast(message, type = "success") {
       const container = document.getElementById("toast-container");
@@ -145,10 +154,18 @@
       renderPinDisplay();
     }
 
+    function hidePickers() {
+      const account = document.getElementById("login-account-pick");
+      const business = document.getElementById("login-business-pick");
+      if (account) account.hidden = true;
+      if (business) business.hidden = true;
+    }
+
     function showAccountPick(candidates) {
       const pad = document.getElementById("pin-pad");
       const pick = document.getElementById("login-account-pick");
       const list = document.getElementById("login-account-list");
+      hidePickers();
       if (pad) pad.hidden = true;
       if (pick) pick.hidden = false;
       if (!list) return;
@@ -160,12 +177,35 @@
         .join("");
     }
 
+    function showBusinessPick(businesses, displayName) {
+      const pad = document.getElementById("pin-pad");
+      const pick = document.getElementById("login-business-pick");
+      const list = document.getElementById("login-business-list");
+      const sub = document.getElementById("login-business-subtitle");
+      hidePickers();
+      if (pad) pad.hidden = true;
+      if (pick) pick.hidden = false;
+      if (sub) {
+        sub.textContent = displayName
+          ? `${displayName} — select which business to open.`
+          : "Select which business to open.";
+      }
+      if (!list) return;
+      list.innerHTML = (businesses || [])
+        .map(
+          (b) =>
+            `<button type="button" class="btn btn-primary btn-block login-account-btn" data-business-id="${b.id}">${escapeHtml(b.name)} <span class="text-muted">· ${escapeHtml(b.role)}</span></button>`
+        )
+        .join("");
+    }
+
     function showPinPad() {
       const pad = document.getElementById("pin-pad");
-      const pick = document.getElementById("login-account-pick");
-      if (pick) pick.hidden = true;
+      hidePickers();
       if (pad) pad.hidden = false;
       pendingPin = "";
+      pendingUserId = null;
+      pendingCandidates = [];
       clearPin();
     }
 
@@ -178,19 +218,28 @@
       window.location.href = params.get("next") || "/";
     }
 
-    async function loginWithPin(pin, userId) {
+    async function loginWithPin(pin, userId, businessId) {
+      const payload = { pin };
+      if (userId != null) payload.user_id = userId;
+      if (businessId != null) payload.business_id = businessId;
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          userId != null ? { pin, user_id: userId } : { pin }
-        ),
+        body: JSON.stringify(payload),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Login failed");
       if (data.need_account_pick) {
         pendingPin = pin;
-        showAccountPick(data.candidates || []);
+        pendingCandidates = data.candidates || [];
+        showAccountPick(pendingCandidates);
+        return;
+      }
+      if (data.need_business_pick) {
+        pendingPin = pin;
+        pendingUserId = data.user_id;
+        pendingCandidates = data.candidates || [];
+        showBusinessPick(data.businesses || [], data.display_name);
         return;
       }
       finishLogin(data);
@@ -243,6 +292,10 @@
 
     document.getElementById("pin-backspace")?.addEventListener("click", backspacePin);
     document.getElementById("btn-back-to-pin")?.addEventListener("click", showPinPad);
+    document.getElementById("btn-back-to-account")?.addEventListener("click", () => {
+      if (pendingCandidates.length > 1) showAccountPick(pendingCandidates);
+      else showPinPad();
+    });
     document.getElementById("login-account-list")?.addEventListener("click", async (e) => {
       const btn = e.target.closest("[data-user-id]");
       if (!btn || submitting) return;
@@ -250,6 +303,25 @@
       btn.disabled = true;
       try {
         await loginWithPin(pendingPin || pinValue, Number(btn.dataset.userId));
+      } catch (err) {
+        toast(err.message, "error");
+        showPinPad();
+      } finally {
+        submitting = false;
+        btn.disabled = false;
+      }
+    });
+    document.getElementById("login-business-list")?.addEventListener("click", async (e) => {
+      const btn = e.target.closest("[data-business-id]");
+      if (!btn || submitting) return;
+      submitting = true;
+      btn.disabled = true;
+      try {
+        await loginWithPin(
+          pendingPin || pinValue,
+          pendingUserId,
+          Number(btn.dataset.businessId)
+        );
       } catch (err) {
         toast(err.message, "error");
         showPinPad();
