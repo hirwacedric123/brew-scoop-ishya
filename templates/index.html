@@ -25,6 +25,19 @@
           width="220"
           height="220"
         >
+        {% if current_business %}
+        <div class="brand-business" id="brand-business">
+          <span class="brand-business-label">Business</span>
+          <strong id="current-business-name">{{ current_business.name }}</strong>
+          {% if memberships|length > 1 or current_user.is_platform_admin %}
+          <select id="business-switcher" aria-label="Switch business">
+            {% for m in memberships %}
+            <option value="{{ m.id }}" {% if current_business and m.id == current_business.id %}selected{% endif %}>{{ m.name }}</option>
+            {% endfor %}
+          </select>
+          {% endif %}
+        </div>
+        {% endif %}
       </div>
 
       <nav class="nav">
@@ -63,10 +76,10 @@
           <span>Sales Reports</span>
         </button>
         {% endif %}
-        {% if current_user.role == 'admin' %}
+        {% if current_user.role == 'admin' or current_user.is_platform_admin %}
         <button class="nav-item" data-view="admin">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-          <span>Team</span>
+          <span>{% if current_user.is_platform_admin and current_user.role != 'admin' %}Businesses{% else %}Team{% endif %}</span>
         </button>
         {% elif current_user.role == 'supervisor' %}
         <button class="nav-item" data-view="admin">
@@ -1215,7 +1228,10 @@
           <button type="button" class="admin-tab active" data-admin-tab="team">Team</button>
           <button type="button" class="admin-tab" data-admin-tab="categories">Categories</button>
           {% endif %}
-          <button type="button" class="admin-tab{% if current_user.role != 'admin' %} active{% endif %}" data-admin-tab="attendance">Attendance</button>
+          {% if current_user.is_platform_admin %}
+          <button type="button" class="admin-tab" data-admin-tab="businesses">Businesses</button>
+          {% endif %}
+          <button type="button" class="admin-tab{% if current_user.role != 'admin' and not current_user.is_platform_admin %} active{% endif %}" data-admin-tab="attendance">Attendance</button>
         </div>
 
         {% if current_user.role == 'admin' %}
@@ -1271,7 +1287,36 @@
         </div>
         {% endif %}
 
-        <div id="admin-panel-attendance" class="admin-panel{% if current_user.role != 'admin' %} active{% endif %}"{% if current_user.role == 'admin' %} hidden{% endif %}>
+        {% if current_user.is_platform_admin %}
+        <div id="admin-panel-businesses" class="admin-panel" hidden>
+          <div class="admin-panel-header">
+            <div>
+              <h3>Businesses</h3>
+              <p class="text-muted admin-panel-desc">Create and manage separate business accounts.</p>
+            </div>
+            <button class="btn btn-primary" id="btn-add-business">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+              Add Business
+            </button>
+          </div>
+          <div class="table-wrap table-premium">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Slug</th>
+                  <th>Members</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="businesses-table-body"></tbody>
+            </table>
+          </div>
+        </div>
+        {% endif %}
+
+        <div id="admin-panel-attendance" class="admin-panel{% if current_user.role != 'admin' and not current_user.is_platform_admin %} active{% endif %}"{% if current_user.role == 'admin' or current_user.is_platform_admin %} hidden{% endif %}>
           <div class="admin-panel-header">
             <div>
               <h3>Attendance</h3>
@@ -1857,6 +1902,8 @@
 
   <script>
     window.CURRENT_USER = {{ current_user|tojson }};
+    window.CURRENT_BUSINESS = {{ (current_business or none)|tojson }};
+    window.MEMBERSHIPS = {{ (memberships or [])|tojson }};
     if (window.CURRENT_USER?.must_change_password) {
       window.location.replace("/change-password");
     }

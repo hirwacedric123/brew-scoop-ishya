@@ -36,6 +36,9 @@ const state = {
   voidCheckoutRef: null,
   historySaleGroups: null,
   currentUser: window.CURRENT_USER || null,
+  currentBusiness: window.CURRENT_BUSINESS || null,
+  memberships: window.MEMBERSHIPS || [],
+  businesses: [],
   sellerShift: null,
   charts: {},
 };
@@ -564,23 +567,120 @@ function switchAdminTab(tabId) {
   });
   const teamPanel = document.getElementById("admin-panel-team");
   const categoriesPanel = document.getElementById("admin-panel-categories");
+  const businessesPanel = document.getElementById("admin-panel-businesses");
   const attendancePanel = document.getElementById("admin-panel-attendance");
   if (teamPanel) teamPanel.hidden = tabId !== "team";
   if (categoriesPanel) categoriesPanel.hidden = tabId !== "categories";
+  if (businessesPanel) businessesPanel.hidden = tabId !== "businesses";
   if (attendancePanel) attendancePanel.hidden = tabId !== "attendance";
 
   if (tabId === "team") loadUsers();
   if (tabId === "categories") loadCategoriesAdmin();
+  if (tabId === "businesses") loadBusinessesAdmin();
   if (tabId === "attendance") loadAttendance();
 }
 
 function loadAdminView() {
   const role = state.currentUser?.role;
-  if (!state.currentUser || (role !== "admin" && role !== "supervisor")) return;
-  const defaultTab = role === "admin" ? "team" : "attendance";
+  const isPlatform = !!state.currentUser?.is_platform_admin;
+  if (!state.currentUser || (role !== "admin" && role !== "supervisor" && !isPlatform)) {
+    return;
+  }
+  const defaultTab = role === "admin" ? "team" : isPlatform ? "businesses" : "attendance";
   const activeTab =
     document.querySelector(".admin-tab.active")?.dataset.adminTab || defaultTab;
   switchAdminTab(activeTab);
+}
+
+async function switchBusiness(businessId) {
+  try {
+    const data = await api("/api/auth/switch-business", {
+      method: "POST",
+      body: JSON.stringify({ business_id: Number(businessId) }),
+    });
+    state.currentUser = data.user;
+    state.currentBusiness = data.business;
+    state.memberships = data.memberships || [];
+    window.CURRENT_USER = data.user;
+    window.CURRENT_BUSINESS = data.business;
+    window.MEMBERSHIPS = data.memberships || [];
+    const nameEl = document.getElementById("current-business-name");
+    if (nameEl && data.business) nameEl.textContent = data.business.name;
+    toast(`Switched to ${data.business?.name || "business"}`);
+    window.location.reload();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function loadBusinessesAdmin() {
+  const tbody = document.getElementById("businesses-table-body");
+  if (!tbody) return;
+  showTableSkeleton("businesses-table-body", 5, 4);
+  try {
+    state.businesses = await api("/api/platform/businesses");
+    if (!state.businesses.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty-state">No businesses yet</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = state.businesses
+      .map(
+        (b) => `
+      <tr>
+        <td><strong>${esc(b.name)}</strong></td>
+        <td>${esc(b.slug)}</td>
+        <td>${fmtNum.format(b.member_count || 0)}</td>
+        <td><span class="badge ${b.is_active ? "badge-stock ok" : "badge-stock out"}">${b.is_active ? "Active" : "Inactive"}</span></td>
+        <td>
+          <button class="btn-icon" title="${b.is_active ? "Deactivate" : "Activate"}" onclick="toggleBusinessActive(${b.id}, ${b.is_active ? "false" : "true"})">
+            ${b.is_active ? "Pause" : "Activate"}
+          </button>
+        </td>
+      </tr>`
+      )
+      .join("");
+  } catch (err) {
+    toast(err.message, "error");
+    tbody.innerHTML = `<tr><td colspan="5" class="empty-state">${esc(err.message)}</td></tr>`;
+  }
+}
+
+async function toggleBusinessActive(id, makeActive) {
+  try {
+    await api(`/api/platform/businesses/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ is_active: makeActive }),
+    });
+    toast(makeActive ? "Business activated" : "Business deactivated");
+    loadBusinessesAdmin();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function openAddBusiness() {
+  const name = prompt("Business name");
+  if (!name || !name.trim()) return;
+  const adminUsername = prompt("First admin username (new or existing)");
+  if (!adminUsername || !adminUsername.trim()) return;
+  const adminPassword = prompt("Admin password (required for new users; ignored if user exists)");
+  const adminPin = prompt("Optional starter PIN for new admin (4–6 digits)") || "";
+  try {
+    await api("/api/platform/businesses", {
+      method: "POST",
+      body: JSON.stringify({
+        name: name.trim(),
+        admin_username: adminUsername.trim(),
+        admin_password: adminPassword || "ChangeMe1",
+        admin_display_name: adminUsername.trim(),
+        admin_pin: adminPin || undefined,
+      }),
+    });
+    toast("Business created");
+    loadBusinessesAdmin();
+  } catch (err) {
+    toast(err.message, "error");
+  }
 }
 
 // ── Skeleton loaders ───────────────────────────────────────────────────────
@@ -5303,6 +5403,14 @@ document.addEventListener("DOMContentLoaded", () => {
       if (e.target === overlay) overlay.hidden = true;
     });
   });
+
+  document.getElementById("business-switcher")?.addEventListener("change", (e) => {
+    const id = e.target.value;
+    if (!id) return;
+    if (String(state.currentBusiness?.id) === String(id)) return;
+    switchBusiness(id);
+  });
+  document.getElementById("btn-add-business")?.addEventListener("click", openAddBusiness);
 });
 
 function debounce(fn, ms) {
@@ -5330,3 +5438,5 @@ window.openEditUser = openEditUser;
 window.openDeleteUser = openDeleteUser;
 window.openEditCategory = openEditCategory;
 window.openDeleteCategory = openDeleteCategory;
+window.toggleBusinessActive = toggleBusinessActive;
+window.openAddBusiness = openAddBusiness;
