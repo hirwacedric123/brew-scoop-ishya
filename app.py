@@ -17,6 +17,7 @@ from werkzeug.security import generate_password_hash
 from auth import (
     ROLES,
     admin_required,
+    current_user_role,
     get_current_user,
     get_user_by_id,
     get_user_by_pin,
@@ -38,6 +39,19 @@ from auth import (
     validate_user_payload,
     verify_password,
     verify_admin_password,
+)
+from business import (
+    create_business,
+    current_business_id,
+    default_business_name,
+    get_business_by_id,
+    get_membership,
+    init_business_tables,
+    list_user_memberships,
+    platform_admin_required,
+    row_to_business,
+    set_session_business,
+    upsert_membership,
 )
 from password_reset import (
     find_valid_reset_token,
@@ -151,8 +165,12 @@ def init_db():
     init_users_table(db)
     init_password_reset_table(db)
     _migrate_db(db)
-    _seed_categories(db)
     _seed_default_admin(db)
+    biz = db.execute("SELECT id FROM businesses ORDER BY id ASC LIMIT 1").fetchone()
+    if biz:
+        _seed_categories(db, biz["id"])
+        _seed_service_tables(db, biz["id"])
+        _ensure_cup_inventory(db, biz["id"])
     db.commit()
     db.close()
 
@@ -394,8 +412,6 @@ def _migrate_db(db):
             ON service_tables(sort_order, name);
         """
     )
-    _seed_service_tables(db)
-
     tx_cols = {row[1] for row in db.execute("PRAGMA table_info(transactions)").fetchall()}
     if "table_id" not in tx_cols:
         db.execute(
@@ -436,21 +452,270 @@ def _migrate_db(db):
     if "cost_price" not in tx_cols:
         db.execute("ALTER TABLE transactions ADD COLUMN cost_price REAL")
 
+    _migrate_business_tenancy(db)
 
-def _seed_service_tables(db):
-    count = db.execute("SELECT COUNT(*) AS n FROM service_tables").fetchone()["n"]
+
+def _table_columns(db, table):
+    return {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _ensure_business_id_column(db, table):
+    cols = _table_columns(db, table)
+    if "business_id" not in cols:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN business_id INTEGER")
+
+
+def _migrate_business_tenancy(db):
+    init_business_tables(db)
+
+    user_cols = _table_columns(db, "users")
+    if "is_platform_admin" not in user_cols:
+        db.execute(
+            "ALTER TABLE users ADD COLUMN is_platform_admin INTEGER NOT NULL DEFAULT 0"
+        )
+
+    for table in (
+        "products",
+        "transactions",
+        "categories",
+        "cup_transactions",
+        "service_tables",
+        "seller_shifts",
+        "seller_reconciliations",
+        "seller_sessions",
+    ):
+        if db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone():
+            _ensure_business_id_column(db, table)
+
+    # Ensure default business exists and backfill.
+    biz = db.execute("SELECT id FROM businesses ORDER BY id ASC LIMIT 1").fetchone()
+    if not biz:
+        ts = now_iso()
+        business_id = create_business(db, default_business_name(), ts)
+    else:
+        business_id = biz["id"]
+
+    for table in (
+        "products",
+        "transactions",
+        "categories",
+        "cup_transactions",
+        "service_tables",
+        "seller_shifts",
+        "seller_reconciliations",
+        "seller_sessions",
+    ):
+        if db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone():
+            db.execute(
+                f"UPDATE {table} SET business_id = ? WHERE business_id IS NULL",
+                (business_id,),
+            )
+
+    _migrate_cup_inventory_per_business(db, business_id)
+    _migrate_categories_business_unique(db, business_id)
+    _migrate_service_tables_business_unique(db, business_id)
+
+    # Memberships from legacy users.role
+    users = db.execute("SELECT id, role FROM users").fetchall()
+    ts = now_iso()
+    for user in users:
+        existing = db.execute(
+            """SELECT 1 FROM user_business_memberships
+               WHERE user_id = ? AND business_id = ?""",
+            (user["id"], business_id),
+        ).fetchone()
+        if not existing:
+            role = user["role"] if user["role"] in ROLES else "seller"
+            db.execute(
+                """INSERT INTO user_business_memberships
+                   (user_id, business_id, role, is_active, created_at)
+                   VALUES (?, ?, ?, 1, ?)""",
+                (user["id"], business_id, role, ts),
+            )
+
+    # Platform admin: env username or first admin user
+    admin_username = os.environ.get("BREW_SCOOP_ADMIN_USERNAME", "admin")
+    admin = db.execute(
+        "SELECT id FROM users WHERE username = ? COLLATE NOCASE",
+        (admin_username,),
+    ).fetchone()
+    if not admin:
+        admin = db.execute(
+            "SELECT id FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1"
+        ).fetchone()
+    if admin:
+        db.execute(
+            "UPDATE users SET is_platform_admin = 1 WHERE id = ?",
+            (admin["id"],),
+        )
+
+    # Permanent PIN uniqueness is per-business (enforced in app code).
+    db.execute("DROP INDEX IF EXISTS idx_users_pin")
+    db.execute("DROP INDEX IF EXISTS idx_users_pin_permanent")
+
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_products_business ON products(business_id)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_business ON transactions(business_id)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_seller_shifts_business_status "
+        "ON seller_shifts(business_id, status)"
+    )
+
+    _seed_service_tables(db, business_id)
+    _seed_categories(db, business_id)
+    _ensure_cup_inventory(db, business_id)
+
+
+def _migrate_cup_inventory_per_business(db, business_id):
+    cols = _table_columns(db, "cup_inventory") if db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cup_inventory'"
+    ).fetchone() else set()
+    if "business_id" in cols:
+        db.execute(
+            "UPDATE cup_inventory SET business_id = ? WHERE business_id IS NULL",
+            (business_id,),
+        )
+        return
+
+    old = db.execute("SELECT * FROM cup_inventory WHERE id = 1").fetchone()
+    qty = old["quantity"] if old else 0
+    reorder = old["reorder_level"] if old else 20
+    updated = old["updated_at"] if old else now_iso()
+    db.execute("DROP TABLE IF EXISTS cup_inventory_biz")
+    db.executescript(
+        """
+        CREATE TABLE cup_inventory_biz (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            business_id INTEGER NOT NULL UNIQUE,
+            quantity INTEGER NOT NULL DEFAULT 0 CHECK(quantity >= 0),
+            reorder_level INTEGER NOT NULL DEFAULT 20 CHECK(reorder_level >= 0),
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
+        );
+        """
+    )
+    exists = db.execute(
+        "SELECT 1 FROM cup_inventory_biz WHERE business_id = ?", (business_id,)
+    ).fetchone()
+    if not exists:
+        db.execute(
+            """INSERT INTO cup_inventory_biz
+               (business_id, quantity, reorder_level, updated_at)
+               VALUES (?, ?, ?, ?)""",
+            (business_id, qty, reorder, updated),
+        )
+    db.execute("DROP TABLE IF EXISTS cup_inventory")
+    db.execute("ALTER TABLE cup_inventory_biz RENAME TO cup_inventory")
+
+
+def _migrate_categories_business_unique(db, business_id):
+    sql = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='categories'"
+    ).fetchone()
+    create_sql = (sql[0] or "") if sql else ""
+    if "UNIQUE(business_id" in create_sql:
+        return
+    rows = db.execute("SELECT * FROM categories").fetchall()
+    db.execute("DROP TABLE IF EXISTS categories_biz")
+    db.executescript(
+        """
+        CREATE TABLE categories_biz (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            business_id INTEGER NOT NULL,
+            name TEXT NOT NULL COLLATE NOCASE,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            uses_cup_stock INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(business_id, name),
+            FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
+        );
+        """
+    )
+    for row in rows:
+        keys = row.keys()
+        biz = row["business_id"] if "business_id" in keys and row["business_id"] else business_id
+        uses = row["uses_cup_stock"] if "uses_cup_stock" in keys else 0
+        db.execute(
+            """INSERT OR IGNORE INTO categories_biz
+               (id, business_id, name, sort_order, created_at, uses_cup_stock)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (row["id"], biz, row["name"], row["sort_order"], row["created_at"], uses),
+        )
+    db.execute("DROP TABLE categories")
+    db.execute("ALTER TABLE categories_biz RENAME TO categories")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_categories_sort ON categories(sort_order)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_categories_business ON categories(business_id)"
+    )
+
+
+def _migrate_service_tables_business_unique(db, business_id):
+    sql = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='service_tables'"
+    ).fetchone()
+    create_sql = (sql[0] or "") if sql else ""
+    if "UNIQUE(business_id" in create_sql:
+        return
+    rows = db.execute("SELECT * FROM service_tables").fetchall()
+    db.execute("DROP TABLE IF EXISTS service_tables_biz")
+    db.executescript(
+        """
+        CREATE TABLE service_tables_biz (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            business_id INTEGER NOT NULL,
+            name TEXT NOT NULL COLLATE NOCASE,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+            UNIQUE(business_id, name),
+            FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
+        );
+        """
+    )
+    for row in rows:
+        keys = row.keys()
+        biz = row["business_id"] if "business_id" in keys and row["business_id"] else business_id
+        db.execute(
+            """INSERT OR IGNORE INTO service_tables_biz
+               (id, business_id, name, sort_order, is_active)
+               VALUES (?, ?, ?, ?, ?)""",
+            (row["id"], biz, row["name"], row["sort_order"], row["is_active"]),
+        )
+    db.execute("DROP TABLE service_tables")
+    db.execute("ALTER TABLE service_tables_biz RENAME TO service_tables")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_service_tables_sort "
+        "ON service_tables(business_id, sort_order, name)"
+    )
+
+
+def _seed_service_tables(db, business_id=None):
+    if business_id is None:
+        business_id = current_business_id() or 1
+    count = db.execute(
+        "SELECT COUNT(*) AS n FROM service_tables WHERE business_id = ?",
+        (business_id,),
+    ).fetchone()["n"]
     if count > 0:
         return
     for i in range(1, 51):
         db.execute(
-            """INSERT INTO service_tables (name, sort_order, is_active)
-               VALUES (?, ?, 1)""",
-            (f"Table {i}", i),
+            """INSERT INTO service_tables (business_id, name, sort_order, is_active)
+               VALUES (?, ?, ?, 1)""",
+            (business_id, f"Table {i}", i),
         )
     db.execute(
-        """INSERT INTO service_tables (name, sort_order, is_active)
-           VALUES (?, ?, 1)""",
-        ("KFC Delivery", 51),
+        """INSERT INTO service_tables (business_id, name, sort_order, is_active)
+           VALUES (?, ?, ?, 1)""",
+        (business_id, "KFC Delivery", 51),
     )
 
 
@@ -540,7 +805,8 @@ def _init_categories_table(db):
         """
         CREATE TABLE IF NOT EXISTS categories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            business_id INTEGER,
+            name TEXT NOT NULL COLLATE NOCASE,
             sort_order INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         );
@@ -550,52 +816,101 @@ def _init_categories_table(db):
     )
 
 
-def _seed_categories(db):
+def _seed_categories(db, business_id=None):
+    if business_id is None:
+        business_id = current_business_id() or 1
     ts = now_iso()
     for cat in DEFAULT_CATEGORIES:
         existing = db.execute(
-            "SELECT id FROM categories WHERE name = ? COLLATE NOCASE", (cat["name"],)
+            """SELECT id FROM categories
+               WHERE business_id = ? AND name = ? COLLATE NOCASE""",
+            (business_id, cat["name"]),
         ).fetchone()
         if existing:
             continue
         db.execute(
-            """INSERT INTO categories (name, sort_order, uses_cup_stock, created_at)
-               VALUES (?, ?, ?, ?)""",
-            (cat["name"], cat["sort_order"], cat["uses_cup_stock"], ts),
+            """INSERT INTO categories
+               (business_id, name, sort_order, uses_cup_stock, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (business_id, cat["name"], cat["sort_order"], cat["uses_cup_stock"], ts),
         )
 
 
-def get_category_names(db):
+def require_business_id():
+    biz_id = current_business_id()
+    if biz_id is None:
+        return None
+    return biz_id
+
+
+def get_category_names(db, business_id=None):
+    if business_id is None:
+        business_id = current_business_id()
+    if business_id is None:
+        return []
     rows = db.execute(
-        "SELECT name FROM categories ORDER BY sort_order ASC, name COLLATE NOCASE ASC"
+        """SELECT name FROM categories
+           WHERE business_id = ?
+           ORDER BY sort_order ASC, name COLLATE NOCASE ASC""",
+        (business_id,),
     ).fetchall()
     return [row["name"] for row in rows]
 
 
-def get_category_cup_map(db):
-    rows = db.execute("SELECT name, uses_cup_stock FROM categories").fetchall()
+def get_category_cup_map(db, business_id=None):
+    if business_id is None:
+        business_id = current_business_id()
+    if business_id is None:
+        return {}
+    rows = db.execute(
+        "SELECT name, uses_cup_stock FROM categories WHERE business_id = ?",
+        (business_id,),
+    ).fetchall()
     return {row["name"]: bool(row["uses_cup_stock"]) for row in rows}
 
 
-def category_uses_cups(db, category_name):
+def category_uses_cups(db, category_name, business_id=None):
+    if business_id is None:
+        business_id = current_business_id()
     row = db.execute(
-        "SELECT uses_cup_stock FROM categories WHERE name = ? COLLATE NOCASE",
-        (category_name,),
+        """SELECT uses_cup_stock FROM categories
+           WHERE business_id = ? AND name = ? COLLATE NOCASE""",
+        (business_id, category_name),
     ).fetchone()
     return bool(row and row["uses_cup_stock"])
 
 
-def get_cup_inventory(db):
-    row = db.execute("SELECT * FROM cup_inventory WHERE id = 1").fetchone()
+def _ensure_cup_inventory(db, business_id):
+    row = db.execute(
+        "SELECT * FROM cup_inventory WHERE business_id = ?", (business_id,)
+    ).fetchone()
     if row is None:
-        ts = now_iso()
         db.execute(
-            "INSERT INTO cup_inventory (id, quantity, reorder_level, updated_at) VALUES (1, 0, 20, ?)",
-            (ts,),
+            """INSERT INTO cup_inventory
+               (business_id, quantity, reorder_level, updated_at)
+               VALUES (?, 0, 20, ?)""",
+            (business_id, now_iso()),
         )
-        db.commit()
-        row = db.execute("SELECT * FROM cup_inventory WHERE id = 1").fetchone()
+        row = db.execute(
+            "SELECT * FROM cup_inventory WHERE business_id = ?", (business_id,)
+        ).fetchone()
     return row
+
+
+def get_cup_inventory(db, business_id=None):
+    if business_id is None:
+        business_id = current_business_id()
+    if business_id is None:
+        business_id = 1
+    return _ensure_cup_inventory(db, business_id)
+
+
+def _set_cup_quantity(db, business_id, quantity, ts=None):
+    ts = ts or now_iso()
+    db.execute(
+        "UPDATE cup_inventory SET quantity=?, updated_at=? WHERE business_id=?",
+        (quantity, ts, business_id),
+    )
 
 
 def row_to_cup_inventory(row):
@@ -629,12 +944,16 @@ def _seed_default_admin(db):
     display_name = os.environ.get("BREW_SCOOP_ADMIN_NAME", "Administrator")
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
-    db.execute(
+    cur = db.execute(
         """INSERT INTO users
-           (username, password_hash, display_name, role, is_active, created_at, updated_at)
-           VALUES (?, ?, ?, 'admin', 1, ?, ?)""",
+           (username, password_hash, display_name, role, is_active,
+            is_platform_admin, created_at, updated_at)
+           VALUES (?, ?, ?, 'admin', 1, 1, ?, ?)""",
         (username, generate_password_hash(password), display_name, ts, ts),
     )
+    biz = db.execute("SELECT id FROM businesses ORDER BY id ASC LIMIT 1").fetchone()
+    if biz:
+        upsert_membership(db, cur.lastrowid, biz["id"], "admin", True, ts)
 
 
 def now_kigali():
@@ -704,9 +1023,13 @@ def _profit_metrics(revenue, cogs):
 
 
 def _can_view_cost(user=None):
+    db = get_db()
     if user is None:
-        user = get_current_user(get_db())
-    return user is not None and user["role"] in COST_VIEW_ROLES
+        user = get_current_user(db)
+    if user is None:
+        return False
+    role = current_user_role(db, user)
+    return role in COST_VIEW_ROLES or bool(row_to_user(user).get("is_platform_admin"))
 
 
 def row_to_product(row, category_cup_map=None, cup_inventory=None, include_cost=None):
@@ -852,8 +1175,15 @@ def _sale_user_clause(user_id, alias=""):
     return f" AND {prefix}user_id = ?", [uid]
 
 
-def _daily_sales_breakdown(db, date_from, date_to, user_id=None):
+def _daily_sales_breakdown(db, date_from, date_to, user_id=None, business_id=None):
     user_clause, user_params = _sale_user_clause(user_id)
+    if business_id is None:
+        business_id = current_business_id()
+    biz_clause = ""
+    biz_params = []
+    if business_id is not None:
+        biz_clause = " AND business_id = ?"
+        biz_params = [business_id]
     rows = db.execute(
         f"""SELECT substr(created_at, 1, 10) AS sale_date,
                   COALESCE(SUM(total_amount), 0) AS revenue,
@@ -862,10 +1192,10 @@ def _daily_sales_breakdown(db, date_from, date_to, user_id=None):
            FROM transactions
            WHERE type = 'sale'{_not_voided_clause()}
              AND substr(created_at, 1, 10) >= ?
-             AND substr(created_at, 1, 10) <= ?{user_clause}
+             AND substr(created_at, 1, 10) <= ?{user_clause}{biz_clause}
            GROUP BY sale_date
            ORDER BY sale_date DESC""",
-        (date_from, date_to, *user_params),
+        (date_from, date_to, *user_params, *biz_params),
     ).fetchall()
     return [
         {
@@ -919,10 +1249,14 @@ def change_password():
 @app.route("/")
 @login_required
 def index():
-    user = get_current_user(get_db())
+    db = get_db()
+    user = get_current_user(db)
+    payload = _session_auth_payload(db, user)
     return render_template(
         "index.html",
-        current_user=public_user(user),
+        current_user=payload["user"],
+        current_business=payload.get("business"),
+        memberships=payload.get("memberships") or [],
     )
 
 
@@ -942,12 +1276,21 @@ def _close_open_sessions(db, user_id, reason, exclude_id=None):
 
 def _start_seller_session(db, user_id):
     ts = now_iso()
+    biz_id = current_business_id()
     _close_open_sessions(db, user_id, "superseded")
-    cur = db.execute(
-        """INSERT INTO seller_sessions (user_id, logged_in_at, last_heartbeat_at)
-           VALUES (?, ?, ?)""",
-        (user_id, ts, ts),
-    )
+    if biz_id is not None:
+        cur = db.execute(
+            """INSERT INTO seller_sessions
+               (business_id, user_id, logged_in_at, last_heartbeat_at)
+               VALUES (?, ?, ?, ?)""",
+            (biz_id, user_id, ts, ts),
+        )
+    else:
+        cur = db.execute(
+            """INSERT INTO seller_sessions (user_id, logged_in_at, last_heartbeat_at)
+               VALUES (?, ?, ?)""",
+            (user_id, ts, ts),
+        )
     db.commit()
     session["seller_session_id"] = cur.lastrowid
     return cur.lastrowid
@@ -991,6 +1334,44 @@ def _session_duration_seconds(row):
         return 0
 
 
+def _login_candidates(db, matches):
+    candidates = []
+    for row in matches:
+        memberships = list_user_memberships(db, row["id"], active_only=True)
+        if not memberships and not row_to_user(row).get("is_platform_admin"):
+            continue
+        candidates.append(
+            {
+                "id": row["id"],
+                "display_name": row["display_name"],
+                "businesses": memberships,
+            }
+        )
+    return candidates
+
+
+def _session_auth_payload(db, user_row):
+    biz_id = current_business_id()
+    memberships = list_user_memberships(db, user_row["id"], active_only=True)
+    role = current_user_role(db, user_row)
+    user_data = public_user(user_row, membership_role=role)
+    business = None
+    if biz_id:
+        biz_row = get_business_by_id(db, biz_id)
+        if biz_row:
+            business = row_to_business(biz_row)
+            membership = get_membership(db, user_row["id"], biz_id)
+            if membership:
+                business["role"] = membership["role"]
+    return {
+        "user": user_data,
+        "business": business,
+        "memberships": memberships,
+        "must_change_password": user_data.get("must_change_password", False),
+        "must_change_pin": user_data.get("must_change_pin", False),
+    }
+
+
 @app.route("/api/auth/login", methods=["POST"])
 def auth_login():
     data = request.get_json(silent=True) or {}
@@ -1008,39 +1389,104 @@ def auth_login():
     if not matches:
         return jsonify({"error": "Invalid PIN"}), 401
 
+    candidates = _login_candidates(db, matches)
+    if not candidates:
+        return jsonify({"error": "Invalid PIN"}), 401
+
     selected_id = data.get("user_id")
+    selected_business_id = data.get("business_id")
+
     if selected_id is not None:
         try:
             selected_id = int(selected_id)
         except (TypeError, ValueError):
             return jsonify({"error": "Invalid account selection"}), 400
-        row = next((r for r in matches if r["id"] == selected_id), None)
-        if not row:
+        candidate = next((c for c in candidates if c["id"] == selected_id), None)
+        if not candidate:
             return jsonify({"error": "Invalid PIN"}), 401
-    elif len(matches) > 1:
+    elif len(candidates) > 1:
         return jsonify({
             "need_account_pick": True,
-            "candidates": [
-                {
-                    "id": r["id"],
-                    "display_name": r["display_name"],
-                }
-                for r in matches
-            ],
+            "candidates": candidates,
         })
     else:
-        row = matches[0]
+        candidate = candidates[0]
+        selected_id = candidate["id"]
 
-    login_user(row["id"])
+    businesses = candidate["businesses"]
+    if selected_business_id is not None:
+        try:
+            selected_business_id = int(selected_business_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid business selection"}), 400
+        if not any(b["id"] == selected_business_id for b in businesses):
+            # Platform admin may enter a business they are not a member of yet.
+            row = get_user_by_id(db, selected_id)
+            if not row_to_user(row).get("is_platform_admin"):
+                return jsonify({"error": "Invalid business selection"}), 400
+            biz = get_business_by_id(db, selected_business_id)
+            if not biz or not biz["is_active"]:
+                return jsonify({"error": "Invalid business selection"}), 400
+    elif len(businesses) > 1:
+        return jsonify({
+            "need_business_pick": True,
+            "user_id": selected_id,
+            "display_name": candidate["display_name"],
+            "businesses": businesses,
+            "candidates": candidates if len(candidates) > 1 else [candidate],
+        })
+    elif len(businesses) == 1:
+        selected_business_id = businesses[0]["id"]
+    else:
+        row = get_user_by_id(db, selected_id)
+        if row_to_user(row).get("is_platform_admin"):
+            first_biz = db.execute(
+                "SELECT id FROM businesses WHERE is_active = 1 ORDER BY id ASC LIMIT 1"
+            ).fetchone()
+            if not first_biz:
+                return jsonify({"error": "No businesses configured"}), 400
+            selected_business_id = first_biz["id"]
+        else:
+            return jsonify({"error": "No business membership found"}), 403
+
+    row = get_user_by_id(db, selected_id)
+    login_user(row["id"], selected_business_id)
     _start_seller_session(db, row["id"])
-    user_data = public_user(row)
-    return jsonify(
-        {
-            "user": user_data,
-            "must_change_password": user_data.get("must_change_password", False),
-            "must_change_pin": user_data.get("must_change_pin", False),
-        }
-    )
+    return jsonify(_session_auth_payload(db, row))
+
+
+@app.route("/api/auth/switch-business", methods=["POST"])
+@login_required
+def auth_switch_business():
+    data = request.get_json(silent=True) or {}
+    try:
+        business_id = int(data.get("business_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid business selection"}), 400
+
+    db = get_db()
+    user = get_current_user(db)
+    membership = get_membership(db, user["id"], business_id)
+    is_platform = row_to_user(user).get("is_platform_admin")
+    if not is_platform and (
+        not membership or not membership["is_active"] or not membership["business_is_active"]
+    ):
+        return jsonify({"error": "You do not belong to that business"}), 403
+
+    biz = get_business_by_id(db, business_id)
+    if not biz or not biz["is_active"]:
+        return jsonify({"error": "Business is inactive"}), 400
+
+    current_biz = current_business_id()
+    if current_biz and current_user_role(db, user) == "seller":
+        open_shift = get_open_seller_shift(db, user["id"], current_biz)
+        if open_shift:
+            return jsonify({
+                "error": "Close or leave your open shift before switching businesses"
+            }), 400
+
+    set_session_business(business_id)
+    return jsonify(_session_auth_payload(db, user))
 
 
 @app.route("/api/auth/verify-admin", methods=["POST"])
@@ -1172,8 +1618,9 @@ def auth_heartbeat():
 @app.route("/api/auth/me", methods=["GET"])
 @login_required
 def auth_me():
-    user = get_current_user(get_db())
-    return jsonify({"user": public_user(user)})
+    db = get_db()
+    user = get_current_user(db)
+    return jsonify(_session_auth_payload(db, user))
 
 
 @app.route("/api/auth/profile", methods=["PUT"])
@@ -1256,10 +1703,24 @@ def auth_set_pin():
 @app.route("/api/admin/users", methods=["GET"])
 @role_required("admin", "supervisor")
 def admin_list_users():
-    rows = get_db().execute(
-        "SELECT * FROM users ORDER BY role ASC, username ASC"
+    db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    rows = db.execute(
+        """SELECT u.*, m.role AS membership_role, m.is_active AS membership_active
+           FROM users u
+           JOIN user_business_memberships m ON m.user_id = u.id
+           WHERE m.business_id = ?
+           ORDER BY m.role ASC, u.username ASC""",
+        (biz_id,),
     ).fetchall()
-    return jsonify([row_to_user(r) for r in rows])
+    result = []
+    for r in rows:
+        data = row_to_user(r, membership_role=r["membership_role"])
+        data["is_active"] = bool(r["is_active"] and r["membership_active"])
+        result.append(data)
+    return jsonify(result)
 
 
 @app.route("/api/admin/attendance", methods=["GET"])
@@ -1346,12 +1807,16 @@ def admin_create_user():
         return jsonify({"error": email_error}), 400
     email = normalize_email(data.get("email"))
 
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    role = data.get("role", "stock_manager")
     pin = None
     if data.get("pin") not in (None, ""):
         pin_error, pin = validate_pin(data.get("pin"))
         if pin_error:
             return jsonify({"error": pin_error}), 400
-        if pin_taken(db, pin):
+        if pin_taken(db, pin, business_id=biz_id):
             return jsonify({"error": "That PIN is already used by another account"}), 409
 
     ts = now_iso()
@@ -1365,15 +1830,16 @@ def admin_create_user():
             hash_password(data["password"]),
             (data.get("display_name") or data["username"]).strip(),
             email,
-            data.get("role", "stock_manager"),
+            role,
             pin,
             ts,
             ts,
         ),
     )
+    upsert_membership(db, cur.lastrowid, biz_id, role, True, ts)
     db.commit()
     row = get_db().execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return jsonify(row_to_user(row)), 201
+    return jsonify(row_to_user(row, membership_role=role)), 201
 
 
 @app.route("/api/admin/users/<int:user_id>", methods=["PUT"])
@@ -1433,8 +1899,15 @@ def admin_update_user(user_id):
             pin_error, pin = validate_pin(raw_pin)
             if pin_error:
                 return jsonify({"error": pin_error}), 400
-            if pin_taken(db, pin, exclude_user_id=user_id):
+            if pin_taken(db, pin, exclude_user_id=user_id, business_id=current_business_id()):
                 return jsonify({"error": "That PIN is already used by another account"}), 409
+
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    membership = get_membership(db, user_id, biz_id)
+    if not membership:
+        return jsonify({"error": "User not found in this business"}), 404
 
     ts = now_iso()
     db.execute(
@@ -1443,9 +1916,10 @@ def admin_update_user(user_id):
            WHERE id=?""",
         (display_name, email, role, is_active, password_hash, pin, ts, user_id),
     )
+    upsert_membership(db, user_id, biz_id, role, bool(is_active), ts)
     db.commit()
     updated = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    return jsonify(row_to_user(updated))
+    return jsonify(row_to_user(updated, membership_role=role))
 
 
 @app.route("/api/admin/users/<int:user_id>", methods=["DELETE"])
@@ -1455,6 +1929,27 @@ def admin_delete_user(user_id):
     current = get_current_user(db)
     if current["id"] == user_id:
         return jsonify({"error": "You cannot delete your own account"}), 400
+
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    membership = get_membership(db, user_id, biz_id)
+    if not membership:
+        return jsonify({"error": "User not found in this business"}), 404
+
+    # Remove from this business only when they belong elsewhere.
+    other = db.execute(
+        """SELECT 1 FROM user_business_memberships
+           WHERE user_id = ? AND business_id != ? LIMIT 1""",
+        (user_id, biz_id),
+    ).fetchone()
+    if other:
+        db.execute(
+            "DELETE FROM user_business_memberships WHERE user_id = ? AND business_id = ?",
+            (user_id, biz_id),
+        )
+        db.commit()
+        return jsonify({"message": "User removed from this business"})
 
     row = db.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
     if not row:
@@ -1510,16 +2005,26 @@ def admin_delete_user(user_id):
 
 # ── Products API ───────────────────────────────────────────────────────────
 
+def _biz_or_error():
+    biz_id = current_business_id()
+    if biz_id is None:
+        return None, (jsonify({"error": "No business selected"}), 400)
+    return biz_id, None
+
+
 @app.route("/api/products", methods=["GET"])
 @login_required
 def list_products():
     db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
     search = request.args.get("search", "").strip()
     category = request.args.get("category", "").strip()
     low_only = request.args.get("low_stock") == "1"
 
-    query = "SELECT * FROM products WHERE 1=1"
-    params = []
+    query = "SELECT * FROM products WHERE business_id = ?"
+    params = [biz_id]
 
     if search:
         query += " AND (name LIKE ? OR description LIKE ?)"
@@ -1538,7 +2043,13 @@ def list_products():
 @login_required
 def get_product(product_id):
     db = get_db()
-    row = db.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    row = db.execute(
+        "SELECT * FROM products WHERE id = ? AND business_id = ?",
+        (product_id, biz_id),
+    ).fetchone()
     if not row:
         return jsonify({"error": "Product not found"}), 404
     category_cup_map = get_category_cup_map(db)
@@ -1556,6 +2067,9 @@ def create_product():
 
     ts = now_iso()
     db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
     category = (data.get("category") or "").strip()
     if not category:
         return jsonify({"error": "Category is required"}), 400
@@ -1566,9 +2080,10 @@ def create_product():
 
     cur = db.execute(
         """INSERT INTO products
-           (name, category, price, cost_price, quantity, reorder_level, sku, description, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (business_id, name, category, price, cost_price, quantity, reorder_level, sku, description, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
+            biz_id,
             data["name"].strip(),
             category,
             float(data["price"]),
@@ -1584,9 +2099,10 @@ def create_product():
     if quantity > 0:
         db.execute(
             """INSERT INTO transactions
-               (product_id, type, quantity, unit_price, cost_price, total_amount, notes, created_at)
-               VALUES (?, 'restock', ?, ?, ?, ?, ?, ?)""",
+               (business_id, product_id, type, quantity, unit_price, cost_price, total_amount, notes, created_at)
+               VALUES (?, ?, 'restock', ?, ?, ?, ?, ?, ?)""",
             (
+                biz_id,
                 cur.lastrowid,
                 quantity,
                 cost_price,
@@ -1607,7 +2123,13 @@ def create_product():
 @role_required("admin", "stock_manager")
 def update_product(product_id):
     db = get_db()
-    row = db.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    row = db.execute(
+        "SELECT * FROM products WHERE id = ? AND business_id = ?",
+        (product_id, biz_id),
+    ).fetchone()
     if not row:
         return jsonify({"error": "Product not found"}), 404
 
@@ -1678,10 +2200,19 @@ def update_product(product_id):
 @role_required("admin", "stock_manager")
 def delete_product(product_id):
     db = get_db()
-    row = db.execute("SELECT id FROM products WHERE id = ?", (product_id,)).fetchone()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    row = db.execute(
+        "SELECT id FROM products WHERE id = ? AND business_id = ?",
+        (product_id, biz_id),
+    ).fetchone()
     if not row:
         return jsonify({"error": "Product not found"}), 404
-    db.execute("DELETE FROM products WHERE id = ?", (product_id,))
+    db.execute(
+        "DELETE FROM products WHERE id = ? AND business_id = ?",
+        (product_id, biz_id),
+    )
     db.commit()
     return jsonify({"message": "Product deleted"})
 
@@ -1754,9 +2285,14 @@ def _execute_checkout(
     except (TypeError, ValueError):
         return None, "Select a table before selling.", 400
 
+    biz_id = current_business_id()
+    if biz_id is None:
+        return None, "No business selected", 400
+
     table_row = db.execute(
-        "SELECT id, name FROM service_tables WHERE id = ? AND is_active = 1",
-        (table_id,),
+        """SELECT id, name FROM service_tables
+           WHERE id = ? AND is_active = 1 AND business_id = ?""",
+        (table_id, biz_id),
     ).fetchone()
     if not table_row:
         return None, "Selected table was not found.", 400
@@ -1770,16 +2306,16 @@ def _execute_checkout(
     )
     ts = now_iso()
     payment_status = "credit" if method == "credit" else "paid"
-    category_cup_map = get_category_cup_map(db)
-    cup_inv = get_cup_inventory(db)
+    category_cup_map = get_category_cup_map(db, biz_id)
+    cup_inv = get_cup_inventory(db, biz_id)
 
     db.execute("BEGIN IMMEDIATE")
     try:
         product_ids = [item["product_id"] for item in items]
         placeholders = ",".join("?" * len(product_ids))
         rows = db.execute(
-            f"SELECT * FROM products WHERE id IN ({placeholders})",
-            product_ids,
+            f"SELECT * FROM products WHERE business_id = ? AND id IN ({placeholders})",
+            [biz_id, *product_ids],
         ).fetchall()
         products = {row["id"]: row for row in rows}
 
@@ -1833,11 +2369,12 @@ def _execute_checkout(
 
             cur = db.execute(
                 """INSERT INTO transactions
-                   (product_id, type, quantity, unit_price, cost_price, total_amount,
+                   (business_id, product_id, type, quantity, unit_price, cost_price, total_amount,
                     notes, created_at, checkout_ref, payment_method, payment_status,
                     user_id, shift_id, table_id)
-                   VALUES (?, 'sale', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, 'sale', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
+                    biz_id,
                     product_id,
                     quantity,
                     unit_price,
@@ -1873,15 +2410,13 @@ def _execute_checkout(
             products[product_id] = updated
 
         if cup_units_needed > 0:
-            db.execute(
-                "UPDATE cup_inventory SET quantity=?, updated_at=? WHERE id=1",
-                (remaining_cups, ts),
-            )
+            biz_id = cup_inv["business_id"] if "business_id" in cup_inv.keys() else current_business_id()
+            _set_cup_quantity(db, biz_id, remaining_cups, ts)
             db.execute(
                 """INSERT INTO cup_transactions
-                   (type, quantity, notes, checkout_ref, created_at)
-                   VALUES ('sale', ?, ?, ?, ?)""",
-                (-cup_units_needed, notes_text, checkout_ref, ts),
+                   (business_id, type, quantity, notes, checkout_ref, created_at)
+                   VALUES (?, 'sale', ?, ?, ?, ?)""",
+                (biz_id, -cup_units_needed, notes_text, checkout_ref, ts),
             )
 
         db.commit()
@@ -1906,11 +2441,15 @@ def _execute_checkout(
 @app.route("/api/tables", methods=["GET"])
 @login_required
 def list_service_tables():
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
     rows = get_db().execute(
         """SELECT id, name, sort_order
            FROM service_tables
-           WHERE is_active = 1
-           ORDER BY sort_order ASC, name COLLATE NOCASE ASC"""
+           WHERE is_active = 1 AND business_id = ?
+           ORDER BY sort_order ASC, name COLLATE NOCASE ASC""",
+        (biz_id,),
     ).fetchall()
     return jsonify([
         {"id": r["id"], "name": r["name"], "sort_order": r["sort_order"]}
@@ -1941,7 +2480,7 @@ def create_sale():
     db = get_db()
     user = get_current_user(db)
     shift_id = None
-    if user["role"] == "seller":
+    if current_user_role(db, user) == "seller":
         shift = get_open_seller_shift(db, user["id"])
         if not shift:
             return jsonify({"error": "Start or join a shift before selling."}), 400
@@ -1985,7 +2524,7 @@ def checkout_sale():
     db = get_db()
     user = get_current_user(db)
     shift_id = None
-    if user["role"] == "seller":
+    if current_user_role(db, user) == "seller":
         shift = get_open_seller_shift(db, user["id"])
         if not shift:
             return jsonify({"error": "Start or join a shift before selling."}), 400
@@ -2004,20 +2543,26 @@ def checkout_sale():
     return jsonify(result), status
 
 
-def _sale_activity_rows(db, limit=40):
-    rows = db.execute(
-        """SELECT t.*, p.name AS product_name, p.category,
-                  u.display_name AS seller_name,
-                  st.name AS table_name
-           FROM transactions t
-           JOIN products p ON p.id = t.product_id
-           LEFT JOIN users u ON u.id = t.user_id
-           LEFT JOIN service_tables st ON st.id = t.table_id
-           WHERE t.type = 'sale'
-           ORDER BY t.created_at DESC, t.id DESC
-           LIMIT ?""",
-        (limit,),
-    ).fetchall()
+def _sale_activity_rows(db, limit=40, business_id=None):
+    if business_id is None:
+        business_id = current_business_id()
+    query = """
+        SELECT t.*, p.name AS product_name, p.category,
+               u.display_name AS seller_name,
+               st.name AS table_name
+        FROM transactions t
+        JOIN products p ON p.id = t.product_id
+        LEFT JOIN users u ON u.id = t.user_id
+        LEFT JOIN service_tables st ON st.id = t.table_id
+        WHERE t.type = 'sale'
+    """
+    params = []
+    if business_id is not None:
+        query += " AND t.business_id = ?"
+        params.append(business_id)
+    query += " ORDER BY t.created_at DESC, t.id DESC LIMIT ?"
+    params.append(limit)
+    rows = db.execute(query, params).fetchall()
     return [row_to_transaction(r) for r in rows]
 
 
@@ -2182,15 +2727,14 @@ def _execute_void_sale(db, checkout_ref, voided_by_user_id):
 
         if cup_units_restore > 0:
             new_cups = cup_inv["quantity"] + cup_units_restore
-            db.execute(
-                "UPDATE cup_inventory SET quantity=?, updated_at=? WHERE id=1",
-                (new_cups, ts),
-            )
+            biz_id = cup_inv["business_id"] if "business_id" in cup_inv.keys() else current_business_id()
+            _set_cup_quantity(db, biz_id, new_cups, ts)
             db.execute(
                 """INSERT INTO cup_transactions
-                   (type, quantity, notes, checkout_ref, created_at)
-                   VALUES ('adjustment', ?, ?, ?, ?)""",
+                   (business_id, type, quantity, notes, checkout_ref, created_at)
+                   VALUES (?, 'adjustment', ?, ?, ?, ?)""",
                 (
+                    biz_id,
                     cup_units_restore,
                     f"Void sale {checkout_ref}",
                     checkout_ref,
@@ -2256,29 +2800,39 @@ def void_sale():
     return jsonify({**result, "message": "Sale voided and stock restored"})
 
 
-def get_open_store_shift(db):
-    """Return the single open store shift, if any."""
+def get_open_store_shift(db, business_id=None):
+    """Return the open store shift for a business, if any."""
+    if business_id is None:
+        business_id = current_business_id()
+    if business_id is None:
+        return None
     return db.execute(
         """SELECT * FROM seller_shifts
-           WHERE status = 'open'
+           WHERE status = 'open' AND business_id = ?
            ORDER BY opened_at ASC
-           LIMIT 1"""
-    ).fetchone()
-
-
-def get_open_seller_shift(db, user_id):
-    """Return the open shift this seller is currently a member of."""
-    return db.execute(
-        """SELECT s.*
-           FROM seller_shifts s
-           JOIN shift_members m ON m.shift_id = s.id
-           WHERE s.status = 'open'
-             AND m.user_id = ?
-             AND m.left_at IS NULL
-           ORDER BY s.opened_at DESC
            LIMIT 1""",
-        (user_id,),
+        (business_id,),
     ).fetchone()
+
+
+def get_open_seller_shift(db, user_id, business_id=None):
+    """Return the open shift this seller is currently a member of."""
+    if business_id is None:
+        business_id = current_business_id()
+    query = """
+        SELECT s.*
+        FROM seller_shifts s
+        JOIN shift_members m ON m.shift_id = s.id
+        WHERE s.status = 'open'
+          AND m.user_id = ?
+          AND m.left_at IS NULL
+    """
+    params = [user_id]
+    if business_id is not None:
+        query += " AND s.business_id = ?"
+        params.append(business_id)
+    query += " ORDER BY s.opened_at DESC LIMIT 1"
+    return db.execute(query, params).fetchone()
 
 
 def get_shift_membership(db, shift_id, user_id):
@@ -2683,11 +3237,14 @@ def seller_shift_start():
             "message": message,
         }), 201
 
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
     cur = db.execute(
         """INSERT INTO seller_shifts
-           (user_id, status, opened_at, opening_float)
-           VALUES (?, 'open', ?, 0)""",
-        (user["id"], ts),
+           (business_id, user_id, status, opened_at, opening_float)
+           VALUES (?, ?, 'open', ?, 0)""",
+        (biz_id, user["id"], ts),
     )
     shift_id = cur.lastrowid
     _add_shift_member(db, shift_id, user["id"], my_role, ts)
@@ -2901,7 +3458,13 @@ def restock_product():
         return jsonify({"error": "Invalid quantity"}), 400
 
     db = get_db()
-    row = db.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    row = db.execute(
+        "SELECT * FROM products WHERE id = ? AND business_id = ?",
+        (product_id, biz_id),
+    ).fetchone()
     if not row:
         return jsonify({"error": "Product not found"}), 404
 
@@ -2920,14 +3483,15 @@ def restock_product():
     new_qty = row["quantity"] + quantity
 
     db.execute(
-        "UPDATE products SET quantity=?, cost_price=?, updated_at=? WHERE id=?",
-        (new_qty, unit_price, ts, product_id),
+        "UPDATE products SET quantity=?, cost_price=?, updated_at=? WHERE id=? AND business_id=?",
+        (new_qty, unit_price, ts, product_id, biz_id),
     )
     db.execute(
         """INSERT INTO transactions
-           (product_id, type, quantity, unit_price, cost_price, total_amount, notes, created_at)
-           VALUES (?, 'restock', ?, ?, ?, ?, ?, ?)""",
+           (business_id, product_id, type, quantity, unit_price, cost_price, total_amount, notes, created_at)
+           VALUES (?, ?, 'restock', ?, ?, ?, ?, ?, ?)""",
         (
+            biz_id,
             product_id,
             quantity,
             unit_price,
@@ -2939,7 +3503,10 @@ def restock_product():
     )
     db.commit()
 
-    updated = db.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    updated = db.execute(
+        "SELECT * FROM products WHERE id = ? AND business_id = ?",
+        (product_id, biz_id),
+    ).fetchone()
     category_cup_map = get_category_cup_map(db)
     cup_inventory = get_cup_inventory(db)
     return jsonify(row_to_product(updated, category_cup_map, cup_inventory))
@@ -2959,7 +3526,13 @@ def adjust_stock():
         return jsonify({"error": "Invalid quantity"}), 400
 
     db = get_db()
-    row = db.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    row = db.execute(
+        "SELECT * FROM products WHERE id = ? AND business_id = ?",
+        (product_id, biz_id),
+    ).fetchone()
     if not row:
         return jsonify({"error": "Product not found"}), 404
 
@@ -2975,19 +3548,30 @@ def adjust_stock():
         return jsonify(row_to_product(row, category_cup_map, cup_inventory))
 
     ts = now_iso()
-    db.execute("UPDATE products SET quantity=?, updated_at=? WHERE id=?",
-               (new_quantity, ts, product_id))
+    db.execute(
+        "UPDATE products SET quantity=?, updated_at=? WHERE id=? AND business_id=?",
+        (new_quantity, ts, product_id, biz_id),
+    )
     db.execute(
         """INSERT INTO transactions
-           (product_id, type, quantity, unit_price, total_amount, notes, created_at)
-           VALUES (?, 'adjustment', ?, ?, 0, ?, ?)""",
-        (product_id, diff, float(row["price"]),
-         f"Adjusted from {row['quantity']} to {new_quantity}. "
-         + ((data.get("notes") or "").strip() or "Manual stock correction"), ts),
+           (business_id, product_id, type, quantity, unit_price, total_amount, notes, created_at)
+           VALUES (?, ?, 'adjustment', ?, ?, 0, ?, ?)""",
+        (
+            biz_id,
+            product_id,
+            diff,
+            float(row["price"]),
+            f"Adjusted from {row['quantity']} to {new_quantity}. "
+            + ((data.get("notes") or "").strip() or "Manual stock correction"),
+            ts,
+        ),
     )
     db.commit()
 
-    updated = db.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    updated = db.execute(
+        "SELECT * FROM products WHERE id = ? AND business_id = ?",
+        (product_id, biz_id),
+    ).fetchone()
     category_cup_map = get_category_cup_map(db)
     cup_inventory = get_cup_inventory(db)
     return jsonify(row_to_product(updated, category_cup_map, cup_inventory))
@@ -3013,21 +3597,21 @@ def restock_cups():
         return jsonify({"error": "Invalid quantity"}), 400
 
     db = get_db()
-    cup_inv = get_cup_inventory(db)
+    biz_id = current_business_id()
+    if biz_id is None:
+        return jsonify({"error": "No business selected"}), 400
+    cup_inv = get_cup_inventory(db, biz_id)
     ts = now_iso()
     new_qty = cup_inv["quantity"] + quantity
 
+    _set_cup_quantity(db, biz_id, new_qty, ts)
     db.execute(
-        "UPDATE cup_inventory SET quantity=?, updated_at=? WHERE id=1",
-        (new_qty, ts),
-    )
-    db.execute(
-        """INSERT INTO cup_transactions (type, quantity, notes, created_at)
-           VALUES ('restock', ?, ?, ?)""",
-        (quantity, (data.get("notes") or "Cup replenishment").strip(), ts),
+        """INSERT INTO cup_transactions (business_id, type, quantity, notes, created_at)
+           VALUES (?, 'restock', ?, ?, ?)""",
+        (biz_id, quantity, (data.get("notes") or "Cup replenishment").strip(), ts),
     )
     db.commit()
-    return jsonify(row_to_cup_inventory(get_cup_inventory(db)))
+    return jsonify(row_to_cup_inventory(get_cup_inventory(db, biz_id)))
 
 
 @app.route("/api/cups/adjust", methods=["POST"])
@@ -3042,23 +3626,23 @@ def adjust_cups():
         return jsonify({"error": "Invalid quantity"}), 400
 
     db = get_db()
-    cup_inv = get_cup_inventory(db)
+    biz_id = current_business_id()
+    if biz_id is None:
+        return jsonify({"error": "No business selected"}), 400
+    cup_inv = get_cup_inventory(db, biz_id)
     diff = new_quantity - cup_inv["quantity"]
     if diff == 0:
         return jsonify(row_to_cup_inventory(cup_inv))
 
     ts = now_iso()
+    _set_cup_quantity(db, biz_id, new_quantity, ts)
     db.execute(
-        "UPDATE cup_inventory SET quantity=?, updated_at=? WHERE id=1",
-        (new_quantity, ts),
-    )
-    db.execute(
-        """INSERT INTO cup_transactions (type, quantity, notes, created_at)
-           VALUES ('adjustment', ?, ?, ?)""",
-        (diff, (data.get("notes") or "Cup stock correction").strip(), ts),
+        """INSERT INTO cup_transactions (business_id, type, quantity, notes, created_at)
+           VALUES (?, 'adjustment', ?, ?, ?)""",
+        (biz_id, diff, (data.get("notes") or "Cup stock correction").strip(), ts),
     )
     db.commit()
-    return jsonify(row_to_cup_inventory(get_cup_inventory(db)))
+    return jsonify(row_to_cup_inventory(get_cup_inventory(db, biz_id)))
 
 
 # ── Transactions & Dashboard API ─────────────────────────────────────────────
@@ -3176,6 +3760,9 @@ def sales_report():
     if not start or not end or start > end:
         return jsonify({"error": "Invalid date range"}), 400
 
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
     user_clause, user_params = _sale_user_clause(user_id, "t")
     sales_rows = db.execute(
         f"""SELECT t.*, p.name AS product_name, p.category,
@@ -3186,16 +3773,23 @@ def sales_report():
            LEFT JOIN users u ON u.id = t.user_id
            LEFT JOIN service_tables st ON st.id = t.table_id
            WHERE t.type = 'sale'{_not_voided_clause("t")}
+             AND t.business_id = ?
              AND substr(t.created_at, 1, 10) >= ?
              AND substr(t.created_at, 1, 10) <= ?{user_clause}
            ORDER BY t.created_at DESC""",
-        (date_from, date_to, *user_params),
+        (biz_id, date_from, date_to, *user_params),
     ).fetchall()
 
-    summary = _sales_summary(db, date_from, date_to, user_id)
+    summary = _sales_summary(
+        db, date_from, date_to, user_id, business_id=biz_id
+    )
     daily = _daily_sales_breakdown(db, date_from, date_to, user_id)
-    payments = _payment_breakdown(db, date_from, date_to, user_id)
-    categories = _category_breakdown(db, date_from, date_to, user_id)
+    payments = _payment_breakdown(
+        db, date_from, date_to, user_id, business_id=biz_id
+    )
+    categories = _category_breakdown(
+        db, date_from, date_to, user_id, business_id=biz_id
+    )
 
     return jsonify({
         "from": date_from,
@@ -3401,10 +3995,15 @@ def shift_detail(shift_id):
 @role_required("admin", "supervisor", "stock_manager")
 def dashboard_stats():
     db = get_db()
-    category_cup_map = get_category_cup_map(db)
-    cup_inventory = get_cup_inventory(db)
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    category_cup_map = get_category_cup_map(db, biz_id)
+    cup_inventory = get_cup_inventory(db, biz_id)
 
-    products = db.execute("SELECT * FROM products").fetchall()
+    products = db.execute(
+        "SELECT * FROM products WHERE business_id = ?", (biz_id,)
+    ).fetchall()
     total_products = len(products)
     total_stock = sum(
         p["quantity"] for p in products if not category_cup_map.get(p["category"], False)
@@ -3455,8 +4054,9 @@ def dashboard_stats():
                           COALESCE(SUM(quantity), 0) AS units
                    FROM transactions
                    WHERE type='sale'{_not_voided_clause()}
+                     AND business_id = ?
                      AND substr(created_at, 1, 10) = ?""",
-                (day_from,),
+                (biz_id, day_from),
             ).fetchone()
         return db.execute(
             f"""SELECT COALESCE(SUM(total_amount), 0) AS revenue,
@@ -3464,9 +4064,10 @@ def dashboard_stats():
                       COALESCE(SUM(quantity), 0) AS units
                FROM transactions
                WHERE type='sale'{_not_voided_clause()}
+                 AND business_id = ?
                  AND substr(created_at, 1, 10) >= ?
                  AND substr(created_at, 1, 10) <= ?""",
-            (day_from, day_to),
+            (biz_id, day_from, day_to),
         ).fetchone()
 
     sales_today = _sales_period(today)
@@ -3487,11 +4088,12 @@ def dashboard_stats():
                   COALESCE(SUM(quantity), 0) AS units
            FROM transactions
            WHERE type='sale'{_not_voided_clause()}
+             AND business_id = ?
              AND substr(created_at, 1, 10) >= ?
              AND substr(created_at, 1, 10) <= ?
            GROUP BY day
            ORDER BY day ASC""",
-        (seven_days_ago, today),
+        (biz_id, seven_days_ago, today),
     ).fetchall()
 
     daily_map = {
@@ -3507,7 +4109,9 @@ def dashboard_stats():
     sales_all = db.execute(
         f"""SELECT COALESCE(SUM(total_amount), 0) AS revenue,
                   COUNT(*) AS count
-           FROM transactions WHERE type='sale'{_not_voided_clause()}"""
+           FROM transactions
+           WHERE type='sale'{_not_voided_clause()} AND business_id = ?""",
+        (biz_id,),
     ).fetchone()
 
     category_stats = db.execute(
@@ -3516,8 +4120,11 @@ def dashboard_stats():
                   SUM(CASE WHEN c.uses_cup_stock = 1 THEN 0 ELSE p.quantity END) AS total_qty,
                   SUM(CASE WHEN c.uses_cup_stock = 1 THEN 0 ELSE p.price * p.quantity END) AS value
            FROM products p
-           LEFT JOIN categories c ON c.name = p.category
-           GROUP BY p.category ORDER BY value DESC"""
+           LEFT JOIN categories c
+             ON c.name = p.category AND c.business_id = p.business_id
+           WHERE p.business_id = ?
+           GROUP BY p.category ORDER BY value DESC""",
+        (biz_id,),
     ).fetchall()
 
     sales_by_category_today = db.execute(
@@ -3528,10 +4135,11 @@ def dashboard_stats():
            FROM transactions t
            JOIN products p ON p.id = t.product_id
            WHERE t.type = 'sale'{_not_voided_clause("t")}
+             AND t.business_id = ?
              AND substr(t.created_at, 1, 10) = ?
            GROUP BY p.category
            ORDER BY revenue DESC, p.category COLLATE NOCASE ASC""",
-        (today,),
+        (biz_id, today),
     ).fetchall()
 
     top_products = db.execute(
@@ -3539,10 +4147,14 @@ def dashboard_stats():
                   COALESCE(SUM(t.quantity), 0) AS units_sold,
                   COALESCE(SUM(t.total_amount), 0) AS revenue
            FROM products p
-           LEFT JOIN transactions t ON t.product_id = p.id AND t.type = 'sale' AND t.voided_at IS NULL
+           LEFT JOIN transactions t
+             ON t.product_id = p.id AND t.type = 'sale' AND t.voided_at IS NULL
+            AND t.business_id = p.business_id
+           WHERE p.business_id = ?
            GROUP BY p.id
            ORDER BY units_sold DESC
-           LIMIT 5"""
+           LIMIT 5""",
+        (biz_id,),
     ).fetchall()
 
     recent = db.execute(
@@ -3553,19 +4165,23 @@ def dashboard_stats():
            JOIN products p ON p.id = t.product_id
            LEFT JOIN users u ON u.id = t.user_id
            LEFT JOIN service_tables st ON st.id = t.table_id
-           ORDER BY t.created_at DESC LIMIT 8"""
+           WHERE t.business_id = ?
+           ORDER BY t.created_at DESC LIMIT 8""",
+        (biz_id,),
     ).fetchall()
 
-    sale_activity = _group_sale_activity(_sale_activity_rows(db, limit=60))
+    sale_activity = _group_sale_activity(_sale_activity_rows(db, limit=60, business_id=biz_id))
     credit_open = db.execute(
         f"""SELECT COALESCE(SUM(total_amount), 0) AS amount,
                   COUNT(DISTINCT checkout_ref) AS sales
            FROM transactions
            WHERE type = 'sale'{_not_voided_clause()}
+             AND business_id = ?
              AND (
                payment_status = 'credit'
                OR (payment_status IS NULL AND lower(COALESCE(payment_method, '')) = 'credit')
-             )"""
+             )""",
+        (biz_id,),
     ).fetchone()
 
     return jsonify({
@@ -3640,13 +4256,19 @@ def dashboard_stats():
 @app.route("/api/categories", methods=["GET"])
 @login_required
 def list_categories():
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
     rows = get_db().execute(
         """SELECT c.id, c.name, c.sort_order, c.created_at, c.uses_cup_stock,
                   COUNT(p.id) AS product_count
            FROM categories c
-           LEFT JOIN products p ON p.category = c.name
+           LEFT JOIN products p
+             ON p.category = c.name AND p.business_id = c.business_id
+           WHERE c.business_id = ?
            GROUP BY c.id
-           ORDER BY c.sort_order ASC, c.name COLLATE NOCASE ASC"""
+           ORDER BY c.sort_order ASC, c.name COLLATE NOCASE ASC""",
+        (biz_id,),
     ).fetchall()
     return jsonify([row_to_category(r) for r in rows])
 
@@ -3662,18 +4284,28 @@ def admin_create_category():
         return jsonify({"error": "Category name is too long"}), 400
 
     db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
     existing = db.execute(
-        "SELECT id FROM categories WHERE name = ? COLLATE NOCASE", (name,)
+        """SELECT id FROM categories
+           WHERE business_id = ? AND name = ? COLLATE NOCASE""",
+        (biz_id, name),
     ).fetchone()
     if existing:
         return jsonify({"error": "Category already exists"}), 409
 
-    max_order = db.execute("SELECT COALESCE(MAX(sort_order), -1) AS n FROM categories").fetchone()["n"]
+    max_order = db.execute(
+        "SELECT COALESCE(MAX(sort_order), -1) AS n FROM categories WHERE business_id = ?",
+        (biz_id,),
+    ).fetchone()["n"]
     uses_cup_stock = 1 if data.get("uses_cup_stock") else 0
     ts = now_iso()
     cur = db.execute(
-        "INSERT INTO categories (name, sort_order, uses_cup_stock, created_at) VALUES (?, ?, ?, ?)",
-        (name, max_order + 1, uses_cup_stock, ts),
+        """INSERT INTO categories
+           (business_id, name, sort_order, uses_cup_stock, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (biz_id, name, max_order + 1, uses_cup_stock, ts),
     )
     db.commit()
     row = db.execute(
@@ -3760,6 +4392,140 @@ def admin_delete_category(category_id):
     db.execute("DELETE FROM categories WHERE id = ?", (category_id,))
     db.commit()
     return jsonify({"message": "Category deleted"})
+
+
+# ── Platform businesses API ─────────────────────────────────────────────────
+
+@app.route("/api/platform/businesses", methods=["GET"])
+@platform_admin_required
+def platform_list_businesses():
+    db = get_db()
+    rows = db.execute(
+        """SELECT b.*,
+                  (SELECT COUNT(*) FROM user_business_memberships m
+                   WHERE m.business_id = b.id AND m.is_active = 1) AS member_count
+           FROM businesses b
+           ORDER BY b.name COLLATE NOCASE ASC"""
+    ).fetchall()
+    return jsonify([
+        {
+            **row_to_business(r),
+            "member_count": r["member_count"],
+        }
+        for r in rows
+    ])
+
+
+@app.route("/api/platform/businesses", methods=["POST"])
+@platform_admin_required
+def platform_create_business():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Business name is required"}), 400
+
+    db = get_db()
+    ts = now_iso()
+    try:
+        business_id = create_business(db, name, ts)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    _seed_categories(db, business_id)
+    _seed_service_tables(db, business_id)
+    _ensure_cup_inventory(db, business_id)
+
+    admin_user_id = data.get("admin_user_id")
+    admin_username = (data.get("admin_username") or "").strip()
+    admin_display = (data.get("admin_display_name") or "").strip()
+    admin_password = data.get("admin_password") or ""
+    admin_pin = data.get("admin_pin")
+
+    if admin_user_id is not None:
+        try:
+            admin_user_id = int(admin_user_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid admin user"}), 400
+        user = get_user_by_id(db, admin_user_id)
+        if not user:
+            db.rollback()
+            return jsonify({"error": "Admin user not found"}), 404
+        upsert_membership(db, admin_user_id, business_id, "admin", True, ts)
+    else:
+        if not admin_username or not admin_password:
+            return jsonify({
+                "error": "Provide admin_user_id or admin_username + admin_password"
+            }), 400
+        existing = get_user_by_username(db, admin_username)
+        if existing:
+            upsert_membership(db, existing["id"], business_id, "admin", True, ts)
+            admin_user_id = existing["id"]
+        else:
+            pin = None
+            if admin_pin not in (None, ""):
+                pin_error, pin = validate_pin(admin_pin)
+                if pin_error:
+                    return jsonify({"error": pin_error}), 400
+                if pin_taken(db, pin, business_id=business_id):
+                    return jsonify({"error": "That PIN is already used in this business"}), 409
+            cur = db.execute(
+                """INSERT INTO users
+                   (username, password_hash, display_name, role, is_active,
+                    must_change_password, pin, must_change_pin, created_at, updated_at)
+                   VALUES (?, ?, ?, 'admin', 1, 1, ?, ?, ?, ?)""",
+                (
+                    admin_username,
+                    hash_password(admin_password),
+                    admin_display or admin_username,
+                    pin,
+                    1 if pin else 0,
+                    ts,
+                    ts,
+                ),
+            )
+            admin_user_id = cur.lastrowid
+            upsert_membership(db, admin_user_id, business_id, "admin", True, ts)
+
+    db.commit()
+    biz = get_business_by_id(db, business_id)
+    return jsonify({
+        **row_to_business(biz),
+        "admin_user_id": admin_user_id,
+    }), 201
+
+
+@app.route("/api/platform/businesses/<int:business_id>", methods=["PUT"])
+@platform_admin_required
+def platform_update_business(business_id):
+    db = get_db()
+    row = get_business_by_id(db, business_id)
+    if not row:
+        return jsonify({"error": "Business not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    name = row["name"]
+    if "name" in data:
+        name = (data.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "Business name is required"}), 400
+
+    is_active = row["is_active"]
+    if "is_active" in data:
+        is_active = 1 if data.get("is_active") else 0
+        if not is_active and business_id == 1:
+            return jsonify({"error": "The primary business cannot be deactivated"}), 400
+
+    from business import unique_business_slug
+
+    slug = unique_business_slug(db, name, exclude_id=business_id) if name != row["name"] else row["slug"]
+    db.execute(
+        """UPDATE businesses
+           SET name = ?, slug = ?, is_active = ?, updated_at = ?
+           WHERE id = ?""",
+        (name, slug, is_active, now_iso(), business_id),
+    )
+    db.commit()
+    return jsonify(row_to_business(get_business_by_id(db, business_id)))
 
 
 with app.app_context():
