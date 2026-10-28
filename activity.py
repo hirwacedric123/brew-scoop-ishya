@@ -178,6 +178,7 @@ ACTION_LABELS = {
     "shift.close": "Closed shift",
     "business.create": "Created business",
     "business.update": "Updated business",
+    "business.delete": "Deleted business",
 }
 
 

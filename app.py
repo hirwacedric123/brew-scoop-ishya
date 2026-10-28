@@ -51,6 +51,7 @@ from business import (
     create_business,
     current_business_id,
     default_business_name,
+    delete_business,
     get_business_by_id,
     get_membership,
     init_business_tables,
@@ -4912,6 +4913,36 @@ def platform_update_business(business_id):
     )
     db.commit()
     return jsonify(row_to_business(get_business_by_id(db, business_id)))
+
+
+@app.route("/api/platform/businesses/<int:business_id>", methods=["DELETE"])
+@platform_admin_required
+def platform_delete_business(business_id):
+    db = get_db()
+    row = get_business_by_id(db, business_id)
+    if not row:
+        return jsonify({"error": "Business not found"}), 404
+
+    try:
+        deleted = delete_business(db, business_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    # Log against another remaining business so the event is still visible.
+    fallback = db.execute(
+        "SELECT id FROM businesses ORDER BY id ASC LIMIT 1"
+    ).fetchone()
+    log_biz = fallback["id"] if fallback else None
+    log_activity(
+        db,
+        action="business.delete",
+        business_id=log_biz,
+        entity_type="business",
+        entity_id=business_id,
+        details={"name": deleted["name"], "slug": deleted["slug"]},
+    )
+    db.commit()
+    return jsonify({"message": "Business deleted", "business": deleted})
 
 
 @app.route("/api/activity-logs", methods=["GET"])
