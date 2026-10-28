@@ -121,20 +121,27 @@
           <span>Sales Reports</span>
         </button>
         {% endif %}
-        {% if current_user.role == 'admin' or current_user.is_platform_admin %}
+        {% if current_user.role in ['admin', 'supervisor', 'stock_manager'] or current_user.is_platform_admin %}
+        <button class="nav-item" data-view="activity">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <span>Activity Log</span>
+        </button>
+        {% endif %}
+        {% if current_user.is_platform_admin %}
+        <button class="nav-item" data-view="businesses">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21h18"/><path d="M5 21V7l7-4 7 4v14"/><path d="M9 21v-6h6v6"/><path d="M9 10h.01M15 10h.01M9 14h.01M15 14h.01"/></svg>
+          <span>Businesses</span>
+        </button>
+        {% endif %}
+        {% if current_user.role == 'admin' %}
         <button class="nav-item" data-view="admin">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-          <span>{% if current_user.is_platform_admin and current_user.role != 'admin' %}Businesses{% else %}Team{% endif %}</span>
+          <span>Team</span>
         </button>
         {% elif current_user.role == 'supervisor' %}
         <button class="nav-item" data-view="admin">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="17 11 19 13 23 9"/></svg>
           <span>Attendance</span>
-        </button>
-        {% elif current_user.role == 'stock_manager' %}
-        <button class="nav-item" data-view="admin">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-          <span>Activity</span>
         </button>
         {% endif %}
       </nav>
