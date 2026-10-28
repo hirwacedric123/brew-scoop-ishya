@@ -1510,6 +1510,7 @@ def auth_switch_business():
                 "error": "Close or leave your open shift before switching businesses"
             }), 400
 
+    from_biz = get_business_by_id(db, current_biz) if current_biz else None
     set_session_business(business_id)
     log_activity(
         db,
@@ -1521,6 +1522,7 @@ def auth_switch_business():
         details={
             "from_business_id": current_biz,
             "to_business_id": business_id,
+            "from_business_name": from_biz["name"] if from_biz else None,
             "business_name": biz["name"],
         },
     )
@@ -1638,6 +1640,7 @@ def auth_logout():
     biz_id = current_business_id()
     session_id = session.get("seller_session_id")
     if user_id:
+        user_row = get_user_by_id(db, user_id)
         log_activity(
             db,
             action="logout",
@@ -1645,6 +1648,10 @@ def auth_logout():
             user_id=user_id,
             entity_type="user",
             entity_id=user_id,
+            details={
+                "display_name": user_row["display_name"] if user_row else None,
+                "username": user_row["username"] if user_row else None,
+            },
         )
         db.commit()
     _end_seller_session(db, session_id, "manual")
@@ -2572,12 +2579,24 @@ def _execute_checkout(
             entity_type="checkout",
             entity_id=checkout_ref,
             details={
+                "checkout_ref": checkout_ref,
                 "total_amount": round(total_amount, 2),
                 "units": total_units,
                 "payment_method": method,
+                "payment_status": payment_status,
                 "table_id": table_id,
                 "table_name": table_row["name"],
                 "item_count": len(result_items),
+                "items": [
+                    {
+                        "name": (item.get("product") or {}).get("name")
+                        or item.get("product_name")
+                        or item.get("name"),
+                        "quantity": item.get("quantity_sold", item.get("quantity")),
+                        "total_amount": item.get("total_amount") or item.get("line_total"),
+                    }
+                    for item in result_items
+                ],
             },
             created_at=ts,
         )
@@ -2823,13 +2842,19 @@ def settle_credit_sale():
              AND voided_at IS NULL""",
         (ts, method, user["id"], checkout_ref, biz_id),
     )
+    settle_total = round(sum(float(r["total_amount"] or 0) for r in rows), 2)
     log_activity(
         db,
         action="sale.settle_credit",
         business_id=biz_id,
         entity_type="checkout",
         entity_id=checkout_ref,
-        details={"settled_method": method},
+        details={
+            "checkout_ref": checkout_ref,
+            "settled_method": method,
+            "total_amount": settle_total,
+            "lines": len(rows),
+        },
         created_at=ts,
     )
     db.commit()
@@ -2864,7 +2889,7 @@ def _execute_void_sale(db, checkout_ref, voided_by_user_id, business_id=None):
         return None, "No business selected", 400
 
     rows = db.execute(
-        """SELECT t.*, p.category
+        """SELECT t.*, p.category, p.name AS product_name
            FROM transactions t
            JOIN products p ON p.id = t.product_id
            WHERE t.type = 'sale' AND t.checkout_ref = ? AND t.business_id = ?
@@ -2934,6 +2959,8 @@ def _execute_void_sale(db, checkout_ref, voided_by_user_id, business_id=None):
                  AND voided_at IS NULL""",
             (ts, voided_by_user_id, checkout_ref, business_id),
         )
+        void_total = round(sum(float(r["total_amount"] or 0) for r in rows), 2)
+        void_units = sum(int(r["quantity"] or 0) for r in rows)
         log_activity(
             db,
             action="sale.void",
@@ -2941,7 +2968,20 @@ def _execute_void_sale(db, checkout_ref, voided_by_user_id, business_id=None):
             user_id=voided_by_user_id,
             entity_type="checkout",
             entity_id=checkout_ref,
-            details={"lines_voided": len(rows)},
+            details={
+                "checkout_ref": checkout_ref,
+                "lines_voided": len(rows),
+                "total_amount": void_total,
+                "units": void_units,
+                "items": [
+                    {
+                        "name": r["product_name"],
+                        "quantity": r["quantity"],
+                        "total_amount": r["total_amount"],
+                    }
+                    for r in rows
+                ],
+            },
             created_at=ts,
         )
         db.commit()
