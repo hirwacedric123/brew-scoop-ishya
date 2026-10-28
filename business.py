@@ -193,6 +193,67 @@ def create_business(db, name, created_at):
     return cur.lastrowid
 
 
+def delete_business(db, business_id):
+    """Permanently remove a business and its scoped operational data.
+
+    Raises ValueError with a user-facing message when deletion is blocked.
+    """
+    business_id = int(business_id)
+    row = get_business_by_id(db, business_id)
+    if not row:
+        raise ValueError("Business not found")
+
+    total = db.execute("SELECT COUNT(*) AS n FROM businesses").fetchone()["n"]
+    if total <= 1:
+        raise ValueError("Cannot delete the only business")
+
+    # Keep the original seeded shop as a non-deletable anchor.
+    oldest = db.execute(
+        "SELECT id FROM businesses ORDER BY id ASC LIMIT 1"
+    ).fetchone()
+    if oldest and oldest["id"] == business_id:
+        raise ValueError("The primary business cannot be deleted")
+
+    if current_business_id() == business_id:
+        raise ValueError("Switch to another business before deleting this one")
+
+    shift_ids = [
+        r["id"]
+        for r in db.execute(
+            "SELECT id FROM seller_shifts WHERE business_id = ?", (business_id,)
+        ).fetchall()
+    ]
+    if shift_ids:
+        placeholders = ",".join("?" * len(shift_ids))
+        db.execute(
+            f"DELETE FROM shift_members WHERE shift_id IN ({placeholders})",
+            shift_ids,
+        )
+
+    for table in (
+        "seller_reconciliations",
+        "seller_shifts",
+        "seller_sessions",
+        "cup_transactions",
+        "transactions",
+        "products",
+        "categories",
+        "service_tables",
+        "cup_inventory",
+        "activity_logs",
+        "user_business_memberships",
+    ):
+        exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if exists:
+            db.execute(f"DELETE FROM {table} WHERE business_id = ?", (business_id,))
+
+    db.execute("DELETE FROM businesses WHERE id = ?", (business_id,))
+    return row_to_business(row)
+
+
 def default_business_name():
     return os.environ.get("BREW_SCOOP_BUSINESS_NAME", "Brew & Scoop").strip() or "Brew & Scoop"
 
