@@ -53,6 +53,8 @@ const VIEW_TITLES = {
   restock: "Restock",
   history: "History",
   sales: "Sales Reports",
+  activity: "Activity Log",
+  businesses: "Businesses",
   admin: "Administration",
   reconcile: "My Shift",
   profile: "My Profile",
@@ -66,10 +68,19 @@ function currentBusinessStorageId() {
   return state.currentBusiness?.id ?? window.CURRENT_BUSINESS?.id ?? null;
 }
 
+function currentUiViewId() {
+  const activeView =
+    document.querySelector(".view.active")?.id?.replace("view-", "") || "";
+  if (activeView === "admin") {
+    const tab = document.querySelector(".admin-tab.active")?.dataset.adminTab;
+    if (tab === "activity" || tab === "businesses") return tab;
+  }
+  return activeView;
+}
+
 function saveUIState() {
   try {
-    const activeView =
-      document.querySelector(".view.active")?.id?.replace("view-", "") || "";
+    const activeView = currentUiViewId();
     localStorage.setItem(
       UI_STORAGE_KEY,
       JSON.stringify({
@@ -193,7 +204,17 @@ function canViewShiftReports() {
 
 function canAccessView(viewId) {
   const role = state.currentUser?.role;
+  const isPlatform = !!state.currentUser?.is_platform_admin;
   if (viewId === "profile") return true;
+  if (viewId === "businesses") return isPlatform;
+  if (viewId === "activity") {
+    return (
+      isPlatform ||
+      role === "admin" ||
+      role === "supervisor" ||
+      role === "stock_manager"
+    );
+  }
   if ((role === "admin" || role === "supervisor") && (viewId === "sell" || viewId === "reconcile")) {
     return false;
   }
@@ -539,6 +560,20 @@ function closeMobileNav() {
   document.getElementById("sidebar-overlay")?.setAttribute("hidden", "");
 }
 
+function highlightAdminSidebar(tabId) {
+  document.querySelectorAll(".nav-item").forEach((n) => n.classList.remove("active"));
+  const sidebarView =
+    tabId === "activity" || tabId === "businesses" ? tabId : "admin";
+  document
+    .querySelector(`.nav-item[data-view="${sidebarView}"]`)
+    ?.classList.add("active");
+  const mobileTitle = document.getElementById("mobile-view-title");
+  if (mobileTitle) {
+    mobileTitle.textContent =
+      VIEW_TITLES[sidebarView] || VIEW_TITLES.admin || "Brew & Scoop";
+  }
+}
+
 function switchView(viewId) {
   if (!canAccessView(viewId)) return;
 
@@ -551,7 +586,10 @@ function switchView(viewId) {
   document.querySelectorAll(".nav-item").forEach((n) => n.classList.remove("active"));
   document.querySelectorAll(".bottom-nav-item[data-view]").forEach((n) => n.classList.remove("active"));
 
-  document.getElementById(`view-${viewId}`)?.classList.add("active");
+  const adminAlias = viewId === "activity" || viewId === "businesses";
+  const sectionId = adminAlias ? "admin" : viewId;
+
+  document.getElementById(`view-${sectionId}`)?.classList.add("active");
   document.querySelector(`.nav-item[data-view="${viewId}"]`)?.classList.add("active");
   document.querySelector(`.bottom-nav-item[data-view="${viewId}"]`)?.classList.add("active");
 
@@ -578,6 +616,8 @@ function switchView(viewId) {
     syncSalesUiFromState();
     loadSalesViewData();
   }
+  if (viewId === "activity") switchAdminTab("activity");
+  if (viewId === "businesses") switchAdminTab("businesses");
   if (viewId === "admin") loadAdminView();
   if (viewId === "reconcile") loadReconcileView();
   if (viewId === "profile") loadProfileView();
@@ -600,11 +640,16 @@ function switchAdminTab(tabId) {
   if (businessesPanel) businessesPanel.hidden = tabId !== "businesses";
   if (attendancePanel) attendancePanel.hidden = tabId !== "attendance";
 
+  if (document.getElementById("view-admin")?.classList.contains("active")) {
+    highlightAdminSidebar(tabId);
+  }
+
   if (tabId === "team") loadUsers();
   if (tabId === "categories") loadCategoriesAdmin();
   if (tabId === "activity") loadActivityLogs();
   if (tabId === "businesses") loadBusinessesAdmin();
   if (tabId === "attendance") loadAttendance();
+  saveUIState();
 }
 
 function loadAdminView() {
@@ -626,31 +671,186 @@ function loadAdminView() {
   switchAdminTab(activeTab);
 }
 
-function formatActivityDetails(details) {
-  if (!details || typeof details !== "object") return "—";
-  const parts = [];
-  if (details.name) parts.push(details.name);
-  if (details.display_name) parts.push(details.display_name);
-  if (details.username) parts.push(`@${details.username}`);
-  if (details.role) parts.push(String(details.role).replace(/_/g, " "));
-  if (details.quantity_added != null) parts.push(`+${details.quantity_added}`);
+const ACTIVITY_DETAIL_LABELS = {
+  name: "Name",
+  old_name: "Previous name",
+  display_name: "Person",
+  username: "Username",
+  role: "Role",
+  role_on_shift: "Shift role",
+  category: "Category",
+  price: "Sell price",
+  cost_price: "Cost price",
+  quantity: "Quantity",
+  quantity_added: "Qty added",
+  new_quantity: "New stock",
+  from_quantity: "From stock",
+  to_quantity: "To stock",
+  diff: "Change",
+  unit_cost: "Unit cost",
+  total_amount: "Amount",
+  total_sales: "Sales total",
+  units: "Units",
+  units_sold: "Units sold",
+  item_count: "Line items",
+  lines: "Lines",
+  lines_voided: "Lines voided",
+  payment_method: "Payment",
+  settled_method: "Settled via",
+  payment_status: "Payment status",
+  table_name: "Table",
+  table_id: "Table ID",
+  business_name: "Business",
+  from_business_name: "From business",
+  to_business_name: "To business",
+  from_business_id: "From business ID",
+  to_business_id: "To business ID",
+  cash_variance: "Cash variance",
+  counted_cash: "Counted cash",
+  expected_cash: "Expected cash",
+  uses_cup_stock: "Uses cup stock",
+  is_active: "Active",
+  removed_membership_only: "Removed membership only",
+  admin_user_id: "Admin user ID",
+  slug: "Slug",
+  checkout_ref: "Sale ref",
+  notes: "Notes",
+  items: "Items",
+};
+
+const ACTIVITY_MONEY_KEYS = new Set([
+  "price",
+  "cost_price",
+  "unit_cost",
+  "total_amount",
+  "total_sales",
+  "cash_variance",
+  "counted_cash",
+  "expected_cash",
+]);
+
+const ACTIVITY_SKIP_KEYS = new Set(["table_id"]);
+
+function formatActivityValue(key, value) {
+  if (value == null || value === "") return null;
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (key === "payment_method" || key === "settled_method") {
+    const method = String(value).toLowerCase();
+    return PAYMENT_LABELS[method] || String(value).toUpperCase();
+  }
+  if (key === "role" || key === "role_on_shift") {
+    return String(value).replace(/_/g, " ");
+  }
+  if (ACTIVITY_MONEY_KEYS.has(key) && Number.isFinite(Number(value))) {
+    return fmt.format(Number(value));
+  }
+  if (key === "quantity_added" && Number.isFinite(Number(value))) {
+    const n = Number(value);
+    return n > 0 ? `+${fmtNum.format(n)}` : fmtNum.format(n);
+  }
+  if (key === "diff" && Number.isFinite(Number(value))) {
+    const n = Number(value);
+    return n > 0 ? `+${fmtNum.format(n)}` : fmtNum.format(n);
+  }
+  if (Array.isArray(value)) {
+    if (!value.length) return null;
+    if (typeof value[0] === "object") {
+      return value
+        .map((item) => {
+          const name = item.name || item.product_name || "Item";
+          const qty = item.quantity ?? item.qty;
+          const total = item.total_amount ?? item.line_total ?? item.total;
+          const bits = [name];
+          if (qty != null) bits.push(`×${qty}`);
+          if (total != null && Number.isFinite(Number(total))) {
+            bits.push(fmt.format(Number(total)));
+          }
+          return bits.join(" ");
+        })
+        .join(", ");
+    }
+    return value.map(String).join(", ");
+  }
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch (_) {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function formatActivityDetails(log) {
+  const details =
+    log?.details && typeof log.details === "object" ? { ...log.details } : {};
+  const rows = [];
+
+  const push = (label, value) => {
+    if (value == null || value === "") return;
+    rows.push({ label, value });
+  };
+
+  if (log?.entity_type && log?.entity_id != null && log.entity_id !== "") {
+    const entityLabel =
+      log.entity_type === "checkout"
+        ? "Sale ref"
+        : log.entity_type === "product"
+          ? "Product ID"
+          : log.entity_type === "user"
+            ? "User ID"
+            : log.entity_type === "shift"
+              ? "Shift ID"
+              : log.entity_type === "business"
+                ? "Business ID"
+                : log.entity_type === "category"
+                  ? "Category ID"
+                  : "Ref";
+    if (!details.checkout_ref && log.entity_type === "checkout") {
+      push(entityLabel, log.entity_id);
+    } else if (log.entity_type !== "checkout") {
+      push(entityLabel, log.entity_id);
+    }
+  }
+
   if (details.from_quantity != null && details.to_quantity != null) {
-    parts.push(`${details.from_quantity} → ${details.to_quantity}`);
+    push(
+      "Stock change",
+      `${fmtNum.format(details.from_quantity)} → ${fmtNum.format(details.to_quantity)}`
+    );
+    delete details.from_quantity;
+    delete details.to_quantity;
   }
-  if (details.total_amount != null) parts.push(fmt.format(details.total_amount));
-  if (details.payment_method) parts.push(String(details.payment_method).toUpperCase());
-  if (details.table_name) parts.push(details.table_name);
-  if (details.business_name) parts.push(details.business_name);
-  if (details.to_business_id && details.from_business_id) {
-    parts.push(`biz ${details.from_business_id} → ${details.to_business_id}`);
+
+  if (details.from_business_name || details.business_name) {
+    if (details.from_business_name && details.business_name) {
+      push("Switched", `${details.from_business_name} → ${details.business_name}`);
+      delete details.from_business_name;
+      delete details.business_name;
+      delete details.from_business_id;
+      delete details.to_business_id;
+    }
   }
-  if (!parts.length) {
-    return Object.entries(details)
-      .slice(0, 4)
-      .map(([k, v]) => `${k}: ${v}`)
-      .join(" · ");
+
+  Object.entries(details).forEach(([key, raw]) => {
+    if (ACTIVITY_SKIP_KEYS.has(key)) return;
+    const formatted = formatActivityValue(key, raw);
+    if (formatted == null) return;
+    push(ACTIVITY_DETAIL_LABELS[key] || key.replace(/_/g, " "), formatted);
+  });
+
+  if (!rows.length) {
+    return `<span class="activity-detail-empty">No extra details</span>`;
   }
-  return parts.join(" · ");
+
+  return `<dl class="activity-detail-list">${rows
+    .map(
+      (row) =>
+        `<div class="activity-detail-row"><dt>${esc(row.label)}</dt><dd>${esc(
+          row.value
+        )}</dd></div>`
+    )
+    .join("")}</dl>`;
 }
 
 async function loadActivityLogs() {
@@ -725,13 +925,24 @@ async function loadActivityLogs() {
     tbody.innerHTML = logs
       .map(
         (log) => `
-      <tr>
-        <td>
+      <tr class="activity-log-row">
+        <td class="activity-when">
           <strong>${esc(formatDate(log.created_at))}</strong>
         </td>
-        <td>${esc(log.user_name || "System")}</td>
+        <td>
+          <div class="activity-user">
+            <strong>${esc(log.user_name || "System")}</strong>
+            ${
+              log.entity_type
+                ? `<span class="activity-entity-type">${esc(
+                    String(log.entity_type).replace(/_/g, " ")
+                  )}</span>`
+                : ""
+            }
+          </div>
+        </td>
         <td><span class="badge badge-category">${esc(log.action_label || log.action)}</span></td>
-        <td class="text-muted">${esc(formatActivityDetails(log.details))}</td>
+        <td class="activity-details-cell">${formatActivityDetails(log)}</td>
       </tr>`
       )
       .join("");

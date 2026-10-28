@@ -93,3 +93,63 @@
   border-radius: var(--radius-sm);
   font-size: 0.88rem;
 }
+
+.activity-log-row td {
+  vertical-align: top;
+}
+
+.activity-when strong {
+  white-space: nowrap;
+}
+
+.activity-user {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.activity-entity-type {
+  font-size: 0.72rem;
+  color: var(--text-subtle);
+  text-transform: capitalize;
+}
+
+.activity-details-cell {
+  min-width: 220px;
+  max-width: 420px;
+}
+
+.activity-detail-empty {
+  color: var(--text-subtle);
+  font-size: 0.85rem;
+}
+
+.activity-detail-list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.activity-detail-row {
+  display: grid;
+  grid-template-columns: minmax(5.5rem, 34%) 1fr;
+  gap: 0.35rem 0.75rem;
+  align-items: start;
+}
+
+.activity-detail-row dt {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+
+.activity-detail-row dd {
+  margin: 0;
+  font-size: 0.86rem;
+  color: var(--text);
+  word-break: break-word;
+}
