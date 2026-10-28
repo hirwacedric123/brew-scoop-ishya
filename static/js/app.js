@@ -883,6 +883,23 @@ async function switchBusiness(businessId) {
   }
 }
 
+async function refreshBusinessSwitcherFromMe() {
+  try {
+    const me = await api("/api/auth/me");
+    state.memberships = me.memberships || [];
+    window.MEMBERSHIPS = state.memberships;
+    if (me.business) {
+      state.currentBusiness = me.business;
+      window.CURRENT_BUSINESS = me.business;
+      const nameEl = document.getElementById("current-business-name");
+      if (nameEl) nameEl.textContent = me.business.name;
+    }
+    renderBusinessSwitcher(state.memberships, state.currentBusiness?.id);
+  } catch (_) {
+    /* switcher refreshes on next page load */
+  }
+}
+
 async function loadBusinessesAdmin() {
   const tbody = document.getElementById("businesses-table-body");
   if (!tbody) return;
@@ -894,12 +911,14 @@ async function loadBusinessesAdmin() {
       return;
     }
     const currentId = state.currentBusiness?.id;
+    const oldestId = Math.min(...state.businesses.map((b) => Number(b.id)));
     tbody.innerHTML = state.businesses
       .map((b) => {
         const isCurrent = String(b.id) === String(currentId);
+        const isPrimary = Number(b.id) === oldestId;
         return `
       <tr>
-        <td><strong>${esc(b.name)}</strong>${isCurrent ? ' <span class="badge badge-stock ok">Current</span>' : ""}</td>
+        <td><strong>${esc(b.name)}</strong>${isCurrent ? ' <span class="badge badge-stock ok">Current</span>' : ""}${isPrimary ? ' <span class="badge badge-stock">Primary</span>' : ""}</td>
         <td>${esc(b.slug)}</td>
         <td>${fmtNum.format(b.member_count || 0)}</td>
         <td><span class="badge ${b.is_active ? "badge-stock ok" : "badge-stock out"}">${b.is_active ? "Active" : "Inactive"}</span></td>
@@ -910,9 +929,19 @@ async function loadBusinessesAdmin() {
                 ? `<button type="button" class="btn btn-ghost btn-sm" onclick="switchBusiness(${b.id})">Switch</button>`
                 : ""
             }
+            <button type="button" class="btn-icon" title="Edit name" onclick="openEditBusiness(${b.id})">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            </button>
             <button class="btn-icon" title="${b.is_active ? "Deactivate" : "Activate"}" onclick="toggleBusinessActive(${b.id}, ${b.is_active ? "false" : "true"})">
               ${b.is_active ? "Pause" : "Activate"}
             </button>
+            ${
+              !isPrimary
+                ? `<button type="button" class="btn-icon danger" title="Delete" onclick="openDeleteBusiness(${b.id}, '${escAttr(b.name)}')">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>`
+                : ""
+            }
           </div>
         </td>
       </tr>`;
@@ -932,6 +961,7 @@ async function toggleBusinessActive(id, makeActive) {
     });
     toast(makeActive ? "Business activated" : "Business deactivated");
     loadBusinessesAdmin();
+    refreshBusinessSwitcherFromMe();
   } catch (err) {
     toast(err.message, "error");
   }
@@ -943,6 +973,21 @@ function openAddBusiness() {
   form.reset();
   showModal("business-modal");
   document.getElementById("business-name")?.focus();
+}
+
+function openEditBusiness(id) {
+  const biz = state.businesses.find((b) => b.id === id);
+  if (!biz) return;
+  document.getElementById("business-edit-id").value = biz.id;
+  document.getElementById("business-edit-name").value = biz.name;
+  showModal("business-edit-modal");
+  document.getElementById("business-edit-name")?.focus();
+}
+
+function openDeleteBusiness(id, name) {
+  state.deleteBusinessId = id;
+  document.getElementById("delete-business-name").textContent = name;
+  showModal("delete-business-modal");
 }
 
 async function saveBusiness(e) {
@@ -986,18 +1031,58 @@ async function saveBusiness(e) {
     toast("Business created");
     hideModal("business-modal");
     loadBusinessesAdmin();
-    try {
-      const me = await api("/api/auth/me");
-      state.memberships = me.memberships || [];
-      window.MEMBERSHIPS = state.memberships;
-      renderBusinessSwitcher(state.memberships, state.currentBusiness?.id);
-    } catch (_) {
-      /* switcher refreshes on next page load */
-    }
+    refreshBusinessSwitcherFromMe();
   } catch (err) {
     toast(err.message, "error");
   } finally {
     if (submitBtn) submitBtn.disabled = false;
+  }
+}
+
+async function saveBusinessEdit(e) {
+  e.preventDefault();
+  const id = document.getElementById("business-edit-id")?.value;
+  const name = document.getElementById("business-edit-name")?.value.trim() || "";
+  if (!id) return;
+  if (!name) {
+    toast("Business name is required", "error");
+    return;
+  }
+
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  if (submitBtn) submitBtn.disabled = true;
+  try {
+    await api(`/api/platform/businesses/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ name }),
+    });
+    toast("Business updated");
+    hideModal("business-edit-modal");
+    loadBusinessesAdmin();
+    refreshBusinessSwitcherFromMe();
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+  }
+}
+
+async function confirmDeleteBusiness() {
+  const id = state.deleteBusinessId;
+  if (!id) return;
+  const btn = document.getElementById("confirm-delete-business");
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/platform/businesses/${id}`, { method: "DELETE" });
+    toast("Business deleted");
+    hideModal("delete-business-modal");
+    state.deleteBusinessId = null;
+    loadBusinessesAdmin();
+    refreshBusinessSwitcherFromMe();
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -5747,6 +5832,8 @@ document.addEventListener("DOMContentLoaded", () => {
   renderBusinessSwitcher(state.memberships, state.currentBusiness?.id);
   document.getElementById("btn-add-business")?.addEventListener("click", openAddBusiness);
   document.getElementById("business-form")?.addEventListener("submit", saveBusiness);
+  document.getElementById("business-edit-form")?.addEventListener("submit", saveBusinessEdit);
+  document.getElementById("confirm-delete-business")?.addEventListener("click", confirmDeleteBusiness);
   document.getElementById("btn-activity-refresh")?.addEventListener("click", loadActivityLogs);
   document.getElementById("activity-from")?.addEventListener("change", loadActivityLogs);
   document.getElementById("activity-to")?.addEventListener("change", loadActivityLogs);
@@ -5781,3 +5868,5 @@ window.openEditCategory = openEditCategory;
 window.openDeleteCategory = openDeleteCategory;
 window.toggleBusinessActive = toggleBusinessActive;
 window.openAddBusiness = openAddBusiness;
+window.openEditBusiness = openEditBusiness;
+window.openDeleteBusiness = openDeleteBusiness;
