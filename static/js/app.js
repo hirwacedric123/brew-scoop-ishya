@@ -455,7 +455,7 @@ function productCell(name, sub) {
 }
 
 function categoryAccent(name) {
-  const palette = ["#c4a574", "#6b8f71", "#5d4037", "#d4a03c", "#8b6f5c", "#7a9e7e", "#a67c52"];
+  const palette = ["#efd196", "#6b8f71", "#164816", "#d4a03c", "#012100", "#7a9e7e", "#c4a574"];
   let hash = 0;
   for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
   return palette[Math.abs(hash) % palette.length];
@@ -688,8 +688,8 @@ function loadAdminView() {
 
 const DEFAULT_BRANDING = {
   logo_url: "/static/img/logo.png",
-  primary_color: "#2c1810",
-  accent_color: "#c4a574",
+  primary_color: "#012100",
+  accent_color: "#efd196",
 };
 
 const ACTIVITY_DETAIL_LABELS = {
@@ -1716,7 +1716,7 @@ function renderRevenueChart(dailyData, todayDate) {
   const units = dailyData.map((d) => d.units);
   const isToday = dailyData.map((d) => d.date === todayDate);
 
-  const bgColors = isToday.map((t) => (t ? "#c4a574" : "rgba(196,165,116,0.32)"));
+  const bgColors = isToday.map((t) => (t ? "#efd196" : "rgba(239,209,150,0.32)"));
   const borderColors = isToday.map((t) => (t ? "#b08040" : "rgba(196,165,116,0.55)"));
 
   state.charts.revenue7d = new Chart(canvas, {
@@ -3505,7 +3505,7 @@ function printInvoice() {
           width: 100%;
           max-width: 118mm;
           margin: 0 auto;
-          color: #2c1810;
+          color: #012100;
           font-family: "Plus Jakarta Sans", system-ui, sans-serif;
           font-size: 10pt;
           line-height: 1.35;
@@ -3540,7 +3540,7 @@ function printInvoice() {
           font-family: Fraunces, Georgia, serif;
           font-size: 13pt;
           font-weight: 600;
-          color: #2c1810;
+          color: #012100;
         }
         #invoice-print-root .invoice-brand-text p {
           margin: 2px 0 0;
@@ -3643,16 +3643,16 @@ function printInvoice() {
         #invoice-print-root .invoice-totals-row.grand {
           margin-top: 4px;
           padding-top: 5px;
-          border-top: 1.5px solid #c4a574;
+          border-top: 1.5px solid #efd196;
           font-family: Fraunces, Georgia, serif;
           font-size: 12pt;
           font-weight: 600;
-          color: #2c1810;
+          color: #012100;
         }
         #invoice-print-root .invoice-notes {
           margin: 0 0 8px;
           padding: 5px 7px;
-          border-left: 3px solid #c4a574;
+          border-left: 3px solid #efd196;
           background: #faf6f1;
           font-size: 8pt;
           color: #5d4037;
@@ -5754,7 +5754,7 @@ function renderSalesReport(report) {
     renderSalesDonut(
       "chart-sales-payment", "sales-payment-legend",
       payment_breakdown, "label", "revenue",
-      (p) => PAYMENT_COLORS[p.method] || "#c4a574"
+      (p) => PAYMENT_COLORS[p.method] || "#efd196"
     );
     renderSalesDonut(
       "chart-sales-cat", "sales-cat-legend",

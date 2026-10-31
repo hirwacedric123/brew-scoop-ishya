@@ -4,7 +4,7 @@
   width: var(--sidebar-width);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, transparent 35%),
-    linear-gradient(180deg, var(--espresso) 0%, #1f0f08 100%);
+    linear-gradient(180deg, var(--espresso) 0%, #001400 100%);
   color: var(--cream);
   display: flex;
   flex-direction: column;

@@ -9,9 +9,11 @@ from flask import jsonify, session
 
 ROLES = ("admin", "supervisor", "stock_manager", "seller")
 
-DEFAULT_PRIMARY_COLOR = "#2c1810"
-DEFAULT_ACCENT_COLOR = "#c4a574"
+DEFAULT_PRIMARY_COLOR = "#012100"
+DEFAULT_ACCENT_COLOR = "#efd196"
 DEFAULT_LOGO_URL = "/static/img/logo.png"
+LEGACY_DEFAULT_PRIMARY_COLOR = "#2c1810"
+LEGACY_DEFAULT_ACCENT_COLOR = "#c4a574"
 HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 LOGO_ALLOWED_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "webp"})
 
@@ -28,7 +30,7 @@ def normalize_hex_color(value, default=DEFAULT_PRIMARY_COLOR):
     if not raw.startswith("#"):
         raw = f"#{raw}"
     if not HEX_COLOR_RE.match(raw):
-        raise ValueError("Colors must be hex values like #2c1810")
+        raise ValueError("Colors must be hex values like #012100")
     return raw.lower()
 
 
@@ -69,8 +71,8 @@ def init_business_tables(db):
             slug TEXT NOT NULL UNIQUE COLLATE NOCASE,
             is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
             logo_path TEXT,
-            primary_color TEXT NOT NULL DEFAULT '#2c1810',
-            accent_color TEXT NOT NULL DEFAULT '#c4a574',
+            primary_color TEXT NOT NULL DEFAULT '#012100',
+            accent_color TEXT NOT NULL DEFAULT '#efd196',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );

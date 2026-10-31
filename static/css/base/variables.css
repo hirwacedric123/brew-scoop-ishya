@@ -1,14 +1,14 @@
-/* base/variables.css */
+/* base/variables.css — Cundino Supermarket palette */
 
 :root {
-  --espresso: #2c1810;
-  --espresso-light: #3d2618;
-  --coffee: #5d4037;
-  --caramel: #c4a574;
-  --caramel-light: #d4b88a;
-  --cream: #f5e6d3;
-  --latte: #e8d5b7;
-  --foam: #faf6f1;
+  --espresso: #012100;
+  --espresso-light: #0a3a00;
+  --coffee: #164816;
+  --caramel: #efd196;
+  --caramel-light: #f5e0b0;
+  --cream: #f7efd8;
+  --latte: #efe0b8;
+  --foam: #fbf8f0;
   --surface: #ffffff;
   --surface-raised: #ffffff;
   --mint: #6b8f71;
@@ -19,23 +19,23 @@
   --warning: #d4a03c;
   --warning-light: #fdf4e3;
   --success: #5a8f6a;
-  --text: #2c1810;
-  --text-muted: #7a6a5e;
-  --text-subtle: #a89888;
-  --border: #e8ddd0;
-  --border-subtle: rgba(232, 221, 208, 0.65);
+  --text: #012100;
+  --text-muted: #5c6b52;
+  --text-subtle: #8a967e;
+  --border: #e4e6d8;
+  --border-subtle: rgba(228, 230, 216, 0.65);
 
   /* Elevation */
-  --shadow-xs: 0 1px 2px rgba(44, 24, 16, 0.04);
-  --shadow: 0 1px 3px rgba(44, 24, 16, 0.05), 0 4px 20px rgba(44, 24, 16, 0.06);
-  --shadow-md: 0 2px 6px rgba(44, 24, 16, 0.05), 0 8px 28px rgba(44, 24, 16, 0.08);
-  --shadow-lg: 0 8px 32px rgba(44, 24, 16, 0.1), 0 24px 64px rgba(44, 24, 16, 0.08);
-  --shadow-hover: 0 4px 12px rgba(44, 24, 16, 0.07), 0 12px 36px rgba(44, 24, 16, 0.1);
+  --shadow-xs: 0 1px 2px rgba(1, 33, 0, 0.04);
+  --shadow: 0 1px 3px rgba(1, 33, 0, 0.05), 0 4px 20px rgba(1, 33, 0, 0.06);
+  --shadow-md: 0 2px 6px rgba(1, 33, 0, 0.05), 0 8px 28px rgba(1, 33, 0, 0.08);
+  --shadow-lg: 0 8px 32px rgba(1, 33, 0, 0.1), 0 24px 64px rgba(1, 33, 0, 0.08);
+  --shadow-hover: 0 4px 12px rgba(1, 33, 0, 0.07), 0 12px 36px rgba(1, 33, 0, 0.1);
   --shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.8);
 
   /* Glass */
   --glass-bg: rgba(255, 255, 255, 0.82);
-  --glass-border: rgba(232, 221, 208, 0.6);
+  --glass-border: rgba(228, 230, 216, 0.6);
   --glass-blur: blur(16px);
 
   /* Radius */

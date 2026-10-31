@@ -5,11 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   {% set brand_name = current_business.name if current_business else 'Brew & Scoop' %}
   {% set brand_logo = (current_business.logo_url if current_business and current_business.logo_url else url_for('static', filename='img/logo.png')) %}
-  {% set brand_primary = (current_business.primary_color if current_business and current_business.primary_color else '#2c1810') %}
-  {% set brand_accent = (current_business.accent_color if current_business and current_business.accent_color else '#c4a574') %}
+  {% set brand_primary = (current_business.primary_color if current_business and current_business.primary_color else '#012100') %}
+  {% set brand_accent = (current_business.accent_color if current_business and current_business.accent_color else '#efd196') %}
   <title>{{ brand_name }} — Stock Management</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='img/favicon-32.png') }}">
   <link rel="icon" type="image/png" href="{{ brand_logo }}">
-  <link rel="apple-touch-icon" href="{{ brand_logo }}">
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png') }}">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,500&family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">

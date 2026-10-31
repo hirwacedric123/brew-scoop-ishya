@@ -51,6 +51,8 @@ from activity import (
 from business import (
     DEFAULT_ACCENT_COLOR,
     DEFAULT_PRIMARY_COLOR,
+    LEGACY_DEFAULT_ACCENT_COLOR,
+    LEGACY_DEFAULT_PRIMARY_COLOR,
     LOGO_ALLOWED_EXTENSIONS,
     business_uploads_dir,
     create_business,
@@ -690,6 +692,19 @@ def _migrate_business_branding(db):
            SET accent_color = ?
            WHERE accent_color IS NULL OR TRIM(accent_color) = ''""",
         (DEFAULT_ACCENT_COLOR,),
+    )
+    # Move legacy coffee-brown defaults to the Cundino green/cream palette.
+    db.execute(
+        """UPDATE businesses
+           SET primary_color = ?
+           WHERE lower(primary_color) = ?""",
+        (DEFAULT_PRIMARY_COLOR, LEGACY_DEFAULT_PRIMARY_COLOR),
+    )
+    db.execute(
+        """UPDATE businesses
+           SET accent_color = ?
+           WHERE lower(accent_color) = ?""",
+        (DEFAULT_ACCENT_COLOR, LEGACY_DEFAULT_ACCENT_COLOR),
     )
 
 
