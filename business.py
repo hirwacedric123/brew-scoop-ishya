@@ -2,16 +2,62 @@
 
 import os
 import re
+import shutil
 from functools import wraps
 
 from flask import jsonify, session
 
 ROLES = ("admin", "supervisor", "stock_manager", "seller")
 
+DEFAULT_PRIMARY_COLOR = "#2c1810"
+DEFAULT_ACCENT_COLOR = "#c4a574"
+DEFAULT_LOGO_URL = "/static/img/logo.png"
+HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+LOGO_ALLOWED_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "webp"})
+
 
 def slugify_business_name(name):
     slug = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
     return slug or "business"
+
+
+def normalize_hex_color(value, default=DEFAULT_PRIMARY_COLOR):
+    raw = (value or "").strip()
+    if not raw:
+        return default
+    if not raw.startswith("#"):
+        raw = f"#{raw}"
+    if not HEX_COLOR_RE.match(raw):
+        raise ValueError("Colors must be hex values like #2c1810")
+    return raw.lower()
+
+
+def business_uploads_dir(business_id, create=False):
+    base = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "static",
+        "uploads",
+        "businesses",
+        str(int(business_id)),
+    )
+    if create:
+        os.makedirs(base, exist_ok=True)
+    return base
+
+
+def business_logo_url(logo_path):
+    if not logo_path:
+        return None
+    path = str(logo_path).lstrip("/")
+    if path.startswith("static/"):
+        return f"/{path}"
+    return f"/static/{path}"
+
+
+def remove_business_uploads(business_id):
+    folder = business_uploads_dir(business_id, create=False)
+    if os.path.isdir(folder):
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def init_business_tables(db):
@@ -22,6 +68,9 @@ def init_business_tables(db):
             name TEXT NOT NULL,
             slug TEXT NOT NULL UNIQUE COLLATE NOCASE,
             is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+            logo_path TEXT,
+            primary_color TEXT NOT NULL DEFAULT '#2c1810',
+            accent_color TEXT NOT NULL DEFAULT '#c4a574',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -46,11 +95,28 @@ def init_business_tables(db):
 
 
 def row_to_business(row):
+    keys = row.keys()
+    logo_path = row["logo_path"] if "logo_path" in keys else None
+    primary = (
+        row["primary_color"]
+        if "primary_color" in keys and row["primary_color"]
+        else DEFAULT_PRIMARY_COLOR
+    )
+    accent = (
+        row["accent_color"]
+        if "accent_color" in keys and row["accent_color"]
+        else DEFAULT_ACCENT_COLOR
+    )
+    logo_url = business_logo_url(logo_path) or DEFAULT_LOGO_URL
     return {
         "id": row["id"],
         "name": row["name"],
         "slug": row["slug"],
         "is_active": bool(row["is_active"]),
+        "logo_path": logo_path,
+        "logo_url": logo_url,
+        "primary_color": primary,
+        "accent_color": accent,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -186,9 +252,18 @@ def create_business(db, name, created_at):
         raise ValueError("Business name is required")
     slug = unique_business_slug(db, name)
     cur = db.execute(
-        """INSERT INTO businesses (name, slug, is_active, created_at, updated_at)
-           VALUES (?, ?, 1, ?, ?)""",
-        (name, slug, created_at, created_at),
+        """INSERT INTO businesses
+           (name, slug, is_active, logo_path, primary_color, accent_color,
+            created_at, updated_at)
+           VALUES (?, ?, 1, NULL, ?, ?, ?, ?)""",
+        (
+            name,
+            slug,
+            DEFAULT_PRIMARY_COLOR,
+            DEFAULT_ACCENT_COLOR,
+            created_at,
+            created_at,
+        ),
     )
     return cur.lastrowid
 
@@ -234,8 +309,15 @@ def delete_business(db, business_id):
         "seller_reconciliations",
         "seller_shifts",
         "seller_sessions",
+        "lot_allocations",
+        "product_lots",
+        "ingredient_lots",
+        "cup_lots",
         "cup_transactions",
         "transactions",
+        "ingredient_transactions",
+        "product_recipes",
+        "ingredients",
         "products",
         "categories",
         "service_tables",
@@ -251,6 +333,7 @@ def delete_business(db, business_id):
             db.execute(f"DELETE FROM {table} WHERE business_id = ?", (business_id,))
 
     db.execute("DELETE FROM businesses WHERE id = ?", (business_id,))
+    remove_business_uploads(business_id)
     return row_to_business(row)
 
 

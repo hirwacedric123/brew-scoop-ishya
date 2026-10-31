@@ -167,6 +167,12 @@ ACTION_LABELS = {
     "sale.settle_credit": "Settled credit sale",
     "cups.restock": "Restocked cups",
     "cups.adjust": "Adjusted cups",
+    "ingredient.create": "Created ingredient",
+    "ingredient.update": "Updated ingredient",
+    "ingredient.delete": "Deleted ingredient",
+    "ingredient.restock": "Restocked ingredient",
+    "ingredient.adjust": "Adjusted ingredient",
+    "product.recipe_update": "Updated product recipe",
     "user.create": "Created user",
     "user.update": "Updated user",
     "user.delete": "Removed user",
@@ -179,6 +185,9 @@ ACTION_LABELS = {
     "business.create": "Created business",
     "business.update": "Updated business",
     "business.delete": "Deleted business",
+    "business.branding_update": "Updated branding colors",
+    "business.logo_upload": "Uploaded business logo",
+    "business.logo_remove": "Removed business logo",
 }
 
 

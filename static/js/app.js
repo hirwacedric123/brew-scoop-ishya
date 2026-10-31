@@ -4,11 +4,14 @@
 
 const state = {
   products: [],
+  ingredients: [],
   categories: [],
   cupInventory: null,
   dashboard: null,
   selectedProductId: null,
   deleteProductId: null,
+  deleteIngredientId: null,
+  recipeDraft: [],
   salesPreset: "today",
   salesReportMode: "date",
   salesFrom: null,
@@ -41,6 +44,7 @@ const state = {
   businesses: [],
   sellerShift: null,
   charts: {},
+  lots: [],
 };
 
 // Pending cart-removal action awaiting admin-password confirmation.
@@ -49,6 +53,7 @@ let pendingCartRemoval = null;
 const VIEW_TITLES = {
   dashboard: "Dashboard",
   products: "Products",
+  ingredients: "Ingredients",
   sell: "Point of Sale",
   restock: "Restock",
   history: "History",
@@ -491,10 +496,16 @@ function getCategoryPriceRange(categoryName) {
 // ── API ────────────────────────────────────────────────────────────────────
 
 async function api(url, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  const isFormData =
+    typeof FormData !== "undefined" && options.body instanceof FormData;
+  if (!isFormData && headers["Content-Type"] == null) {
+    headers["Content-Type"] = "application/json";
+  }
   const res = await fetch(url, {
-    headers: { "Content-Type": "application/json", ...options.headers },
-    credentials: "same-origin",
     ...options,
+    headers,
+    credentials: "same-origin",
   });
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) {
@@ -600,6 +611,7 @@ function switchView(viewId) {
 
   if (viewId === "dashboard") loadDashboard();
   if (viewId === "products") loadProducts();
+  if (viewId === "ingredients") loadIngredients();
   if (viewId === "sell") {
     if (!state.keepSellCategory) state.sellCategory = "";
     state.keepSellCategory = false;
@@ -631,11 +643,13 @@ function switchAdminTab(tabId) {
   });
   const teamPanel = document.getElementById("admin-panel-team");
   const categoriesPanel = document.getElementById("admin-panel-categories");
+  const brandingPanel = document.getElementById("admin-panel-branding");
   const activityPanel = document.getElementById("admin-panel-activity");
   const businessesPanel = document.getElementById("admin-panel-businesses");
   const attendancePanel = document.getElementById("admin-panel-attendance");
   if (teamPanel) teamPanel.hidden = tabId !== "team";
   if (categoriesPanel) categoriesPanel.hidden = tabId !== "categories";
+  if (brandingPanel) brandingPanel.hidden = tabId !== "branding";
   if (activityPanel) activityPanel.hidden = tabId !== "activity";
   if (businessesPanel) businessesPanel.hidden = tabId !== "businesses";
   if (attendancePanel) attendancePanel.hidden = tabId !== "attendance";
@@ -646,6 +660,7 @@ function switchAdminTab(tabId) {
 
   if (tabId === "team") loadUsers();
   if (tabId === "categories") loadCategoriesAdmin();
+  if (tabId === "branding") loadBrandingAdmin();
   if (tabId === "activity") loadActivityLogs();
   if (tabId === "businesses") loadBusinessesAdmin();
   if (tabId === "attendance") loadAttendance();
@@ -671,6 +686,12 @@ function loadAdminView() {
   switchAdminTab(activeTab);
 }
 
+const DEFAULT_BRANDING = {
+  logo_url: "/static/img/logo.png",
+  primary_color: "#2c1810",
+  accent_color: "#c4a574",
+};
+
 const ACTIVITY_DETAIL_LABELS = {
   name: "Name",
   old_name: "Previous name",
@@ -693,6 +714,9 @@ const ACTIVITY_DETAIL_LABELS = {
   units: "Units",
   units_sold: "Units sold",
   item_count: "Line items",
+  primary_color: "Primary color",
+  accent_color: "Accent color",
+  logo_path: "Logo",
   lines: "Lines",
   lines_voided: "Lines voided",
   payment_method: "Payment",
@@ -1104,11 +1128,239 @@ async function refreshBusinessSwitcherFromMe() {
       window.CURRENT_BUSINESS = me.business;
       const nameEl = document.getElementById("current-business-name");
       if (nameEl) nameEl.textContent = me.business.name;
+      applyBusinessBranding(me.business);
     }
     renderBusinessSwitcher(state.memberships, state.currentBusiness?.id);
   } catch (_) {
     /* switcher refreshes on next page load */
   }
+}
+
+function normalizeBrandHex(value, fallback) {
+  const raw = String(value || "").trim();
+  if (!raw) return fallback;
+  const withHash = raw.startsWith("#") ? raw : `#${raw}`;
+  if (!/^#[0-9A-Fa-f]{6}$/.test(withHash)) return fallback;
+  return withHash.toLowerCase();
+}
+
+function applyBusinessBranding(business) {
+  const biz = business || state.currentBusiness || {};
+  const name = biz.name || "Brew & Scoop";
+  const primary = normalizeBrandHex(
+    biz.primary_color,
+    DEFAULT_BRANDING.primary_color
+  );
+  const accent = normalizeBrandHex(
+    biz.accent_color,
+    DEFAULT_BRANDING.accent_color
+  );
+  const logo = biz.logo_url || DEFAULT_BRANDING.logo_url;
+
+  const root = document.documentElement;
+  root.style.setProperty("--espresso", primary);
+  root.style.setProperty(
+    "--espresso-light",
+    `color-mix(in srgb, ${primary} 82%, white)`
+  );
+  root.style.setProperty(
+    "--coffee",
+    `color-mix(in srgb, ${primary} 72%, white)`
+  );
+  root.style.setProperty("--caramel", accent);
+  root.style.setProperty(
+    "--caramel-light",
+    `color-mix(in srgb, ${accent} 78%, white)`
+  );
+  root.style.setProperty("--brand-primary", primary);
+  root.style.setProperty("--brand-accent", accent);
+
+  document.querySelectorAll(".brand-logo, .invoice-logo").forEach((img) => {
+    img.src = logo;
+    img.alt = name;
+  });
+
+  const invoiceName = document.getElementById("invoice-business-name");
+  if (invoiceName) invoiceName.textContent = name;
+
+  const brandingName = document.getElementById("branding-business-name");
+  if (brandingName) brandingName.textContent = name;
+
+  const preview = document.getElementById("branding-logo-preview");
+  if (preview) {
+    preview.src = logo;
+    preview.alt = `${name} logo preview`;
+  }
+
+  document.title = `${name} — Stock Management`;
+  document
+    .querySelectorAll('link[rel="icon"], link[rel="apple-touch-icon"]')
+    .forEach((link) => {
+      link.href = logo;
+    });
+}
+
+function syncBrandingColorInputs(primary, accent) {
+  const p = normalizeBrandHex(primary, DEFAULT_BRANDING.primary_color);
+  const a = normalizeBrandHex(accent, DEFAULT_BRANDING.accent_color);
+  const primaryEl = document.getElementById("branding-primary");
+  const accentEl = document.getElementById("branding-accent");
+  const primaryHex = document.getElementById("branding-primary-hex");
+  const accentHex = document.getElementById("branding-accent-hex");
+  if (primaryEl) primaryEl.value = p;
+  if (accentEl) accentEl.value = a;
+  if (primaryHex) primaryHex.value = p;
+  if (accentHex) accentHex.value = a;
+  updateBrandingPreviewSwatches(p, a);
+}
+
+function updateBrandingPreviewSwatches(primary, accent) {
+  const preview = document.getElementById("branding-preview");
+  if (!preview) return;
+  preview.style.setProperty("--preview-primary", primary);
+  preview.style.setProperty("--preview-accent", accent);
+}
+
+function loadBrandingAdmin() {
+  const biz = state.currentBusiness || {};
+  const nameEl = document.getElementById("branding-business-name");
+  if (nameEl) nameEl.textContent = biz.name || "Business";
+  syncBrandingColorInputs(biz.primary_color, biz.accent_color);
+  const preview = document.getElementById("branding-logo-preview");
+  if (preview) {
+    preview.src = biz.logo_url || DEFAULT_BRANDING.logo_url;
+    preview.alt = `${biz.name || "Business"} logo preview`;
+  }
+  const fileInput = document.getElementById("branding-logo-file");
+  const uploadBtn = document.getElementById("btn-upload-logo");
+  if (fileInput) fileInput.value = "";
+  if (uploadBtn) uploadBtn.disabled = true;
+}
+
+async function saveBrandingColors(e) {
+  e.preventDefault();
+  const primary = normalizeBrandHex(
+    document.getElementById("branding-primary")?.value,
+    DEFAULT_BRANDING.primary_color
+  );
+  const accent = normalizeBrandHex(
+    document.getElementById("branding-accent")?.value,
+    DEFAULT_BRANDING.accent_color
+  );
+  const btn = document.getElementById("btn-save-branding-colors");
+  if (btn) btn.disabled = true;
+  try {
+    const biz = await api("/api/business/branding", {
+      method: "PUT",
+      body: JSON.stringify({
+        primary_color: primary,
+        accent_color: accent,
+      }),
+    });
+    state.currentBusiness = { ...state.currentBusiness, ...biz };
+    window.CURRENT_BUSINESS = state.currentBusiness;
+    applyBusinessBranding(biz);
+    syncBrandingColorInputs(biz.primary_color, biz.accent_color);
+    toast("Brand colors saved");
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function resetBrandingColors() {
+  syncBrandingColorInputs(
+    DEFAULT_BRANDING.primary_color,
+    DEFAULT_BRANDING.accent_color
+  );
+  applyBusinessBranding({
+    ...state.currentBusiness,
+    primary_color: DEFAULT_BRANDING.primary_color,
+    accent_color: DEFAULT_BRANDING.accent_color,
+  });
+}
+
+async function uploadBusinessLogo() {
+  const fileInput = document.getElementById("branding-logo-file");
+  const file = fileInput?.files?.[0];
+  if (!file) {
+    toast("Choose a logo image first", "error");
+    return;
+  }
+  const btn = document.getElementById("btn-upload-logo");
+  if (btn) btn.disabled = true;
+  try {
+    const form = new FormData();
+    form.append("logo", file);
+    const biz = await api("/api/business/branding/logo", {
+      method: "POST",
+      body: form,
+    });
+    state.currentBusiness = { ...state.currentBusiness, ...biz };
+    window.CURRENT_BUSINESS = state.currentBusiness;
+    applyBusinessBranding(biz);
+    if (fileInput) fileInput.value = "";
+    toast("Logo uploaded");
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    if (btn) btn.disabled = !document.getElementById("branding-logo-file")?.files?.length;
+  }
+}
+
+async function removeBusinessLogo() {
+  if (!confirm("Remove the custom logo and restore the default?")) return;
+  const btn = document.getElementById("btn-remove-logo");
+  if (btn) btn.disabled = true;
+  try {
+    const biz = await api("/api/business/branding/logo", { method: "DELETE" });
+    state.currentBusiness = { ...state.currentBusiness, ...biz };
+    window.CURRENT_BUSINESS = state.currentBusiness;
+    applyBusinessBranding(biz);
+    toast("Logo removed");
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function onBrandingLogoFileChange() {
+  const fileInput = document.getElementById("branding-logo-file");
+  const uploadBtn = document.getElementById("btn-upload-logo");
+  const preview = document.getElementById("branding-logo-preview");
+  const file = fileInput?.files?.[0];
+  if (uploadBtn) uploadBtn.disabled = !file;
+  if (file && preview) {
+    const url = URL.createObjectURL(file);
+    preview.src = url;
+    preview.onload = () => URL.revokeObjectURL(url);
+  }
+}
+
+function bindBrandingColorPair(pickerId, hexId) {
+  const picker = document.getElementById(pickerId);
+  const hex = document.getElementById(hexId);
+  if (!picker || !hex) return;
+
+  picker.addEventListener("input", () => {
+    hex.value = picker.value;
+    updateBrandingPreviewSwatches(
+      document.getElementById("branding-primary")?.value,
+      document.getElementById("branding-accent")?.value
+    );
+  });
+
+  hex.addEventListener("change", () => {
+    const normalized = normalizeBrandHex(hex.value, picker.value);
+    hex.value = normalized;
+    picker.value = normalized;
+    updateBrandingPreviewSwatches(
+      document.getElementById("branding-primary")?.value,
+      document.getElementById("branding-accent")?.value
+    );
+  });
 }
 
 async function loadBusinessesAdmin() {
@@ -1813,10 +2065,57 @@ function renderDashboard(d) {
             <span>${esc(p.category)}${p.is_cup_pool ? "" : ` · reorder at ${p.reorder_level}`}</span>
           </div>
         </div>
-        <span class="badge badge-stock ${p.stock_status}">${p.is_cup_pool || p.uses_cup_stock ? `${p.quantity} cups` : `${p.quantity} left`}</span>
+        <span class="badge badge-stock ${p.stock_status}">${
+          p.is_cup_pool || p.uses_cup_stock
+            ? `${p.quantity} cups`
+            : p.is_ingredient
+              ? `${p.quantity} ${esc(p.unit || "")}`.trim()
+              : p.uses_recipe
+                ? `${p.quantity} makeable`
+                : `${p.quantity} left`
+        }</span>
       </div>`
       )
       .join("");
+  }
+
+  const expiringLabel = document.getElementById("expiring-lots-label");
+  const expiringList = document.getElementById("expiring-lots-list");
+  const expiring = d.expiring_lots || [];
+  if (expiringLabel) {
+    const count = d.expiring_lots_count ?? expiring.length;
+    expiringLabel.textContent = count ? `${count} within 7 days` : "None soon";
+    expiringLabel.className = count
+      ? "status-pill status-pill-warn"
+      : "status-pill status-pill-ok";
+  }
+  if (expiringList) {
+    if (!expiring.length) {
+      expiringList.innerHTML = emptyState(
+        UI_ICONS.check,
+        "No expiry pressure",
+        "No open lots expire in the next 7 days.",
+        true
+      );
+    } else {
+      expiringList.innerHTML = expiring
+        .map((lot) => {
+          const badgeClass = lot.expired ? "out" : "low";
+          const badgeText = lot.expired ? "Expired" : lot.expiry_date;
+          return `
+        <div class="alert-row">
+          <div class="alert-row-info">
+            <div class="product-avatar product-avatar-sm">${esc(productInitials(lot.item_name || lot.pool))}</div>
+            <div>
+              <strong>${esc(lot.item_name || "Lot")}</strong>
+              <span>${esc(lot.pool)} · ${fmtNum.format(lot.qty_remaining)} left · lot #${lot.id}</span>
+            </div>
+          </div>
+          <span class="badge badge-stock ${badgeClass}">${esc(badgeText)}</span>
+        </div>`;
+        })
+        .join("");
+    }
   }
 
   const topList = document.getElementById("top-products-list");
@@ -1977,13 +2276,26 @@ function renderProductsTable(products) {
       (p) => `
     <tr>
       <td>
-        ${productCell(p.name, p.uses_cup_stock ? "Uses cup stock" : esc(p.category))}
+        ${productCell(
+          p.name,
+          p.uses_recipe
+            ? "Recipe product"
+            : p.uses_cup_stock
+              ? "Uses cup stock"
+              : esc(p.category)
+        )}
       </td>
       <td><span class="badge badge-category">${esc(p.category)}</span></td>
       <td>${fmt.format(p.price)}</td>
       <td>${p.cost_price != null ? fmt.format(p.cost_price) : "—"}</td>
       <td>${formatMargin(p)}</td>
-      <td><strong>${p.uses_cup_stock ? `${fmtNum.format(p.quantity)} cups` : fmtNum.format(p.quantity)}</strong></td>
+      <td><strong>${
+        p.uses_cup_stock
+          ? `${fmtNum.format(p.quantity)} cups`
+          : p.uses_recipe
+            ? `${fmtNum.format(p.quantity)} makeable`
+            : fmtNum.format(p.quantity)
+      }</strong></td>
       <td><span class="badge badge-stock ${p.stock_status}">${stockLabel(p)}</span></td>
       <td>
         ${rowActions(p)}
@@ -2006,29 +2318,175 @@ function stockLabel(p) {
     if (p.stock_status === "low") return "Low cups";
     return `${fmtNum.format(p.quantity)} cups`;
   }
+  if (p.uses_recipe) {
+    if (p.stock_status === "out") return "No ingredients";
+    return `${fmtNum.format(p.quantity)} makeable`;
+  }
   if (p.stock_status === "out") return "Out of stock";
   if (p.stock_status === "low") return "Low stock";
   return "In stock";
 }
 
 function availableStockLabel(p) {
-  return p.uses_cup_stock ? `${p.quantity} cups` : `${p.quantity} left`;
+  if (p.uses_cup_stock) return `${p.quantity} cups`;
+  if (p.uses_recipe) return `${p.quantity} makeable`;
+  return `${p.quantity} left`;
+}
+
+function productUsesRecipeChecked() {
+  return !!document.getElementById("product-uses-recipe")?.checked;
 }
 
 function updateProductStockFields() {
   const categoryName = document.getElementById("product-category")?.value;
   const usesCups = categoryUsesCups(categoryName);
+  const usesRecipe = productUsesRecipeChecked();
+  const recipeCheckbox = document.getElementById("product-uses-recipe");
   const stockFields = document.getElementById("product-stock-fields");
   const cupHint = document.getElementById("product-cup-hint");
+  const recipeFields = document.getElementById("product-recipe-fields");
+  const costGroup = document.getElementById("product-cost-group");
+  const recipeCostGroup = document.getElementById("product-recipe-cost-group");
 
-  if (stockFields) stockFields.hidden = usesCups;
-  if (cupHint) cupHint.hidden = !usesCups;
+  if (usesCups && usesRecipe && recipeCheckbox) {
+    recipeCheckbox.checked = false;
+    toast("Cup-stock categories cannot use recipes. Pick another category.", "error");
+  }
+
+  const recipeOn = productUsesRecipeChecked();
+  if (recipeCheckbox) recipeCheckbox.disabled = usesCups;
+  if (stockFields) stockFields.hidden = usesCups || recipeOn;
+  if (cupHint) cupHint.hidden = !usesCups || recipeOn;
+  if (recipeFields) recipeFields.hidden = !recipeOn;
+  if (costGroup) costGroup.hidden = recipeOn;
+  if (recipeCostGroup) recipeCostGroup.hidden = !recipeOn;
+  if (recipeOn) updateRecipeCostPreview();
+}
+
+function ensureIngredientsLoaded(force = false) {
+  if (!force && state.ingredients.length) {
+    return Promise.resolve(state.ingredients);
+  }
+  return api("/api/ingredients").then((items) => {
+    state.ingredients = items;
+    return items;
+  });
+}
+
+function renderRecipeLines() {
+  const container = document.getElementById("recipe-lines");
+  if (!container) return;
+  const ingredients = state.ingredients || [];
+  container.innerHTML = state.recipeDraft
+    .map((line, index) => {
+      const selected = ingredients.find((i) => i.id === Number(line.ingredient_id));
+      const unit = selected?.unit || "—";
+      return `
+      <div class="recipe-line" data-index="${index}">
+        <select data-recipe-field="ingredient_id" aria-label="Ingredient">
+          <option value="">Choose...</option>
+          ${ingredients
+            .map(
+              (ing) =>
+                `<option value="${ing.id}" ${
+                  Number(line.ingredient_id) === ing.id ? "selected" : ""
+                }>${esc(ing.name)}</option>`
+            )
+            .join("")}
+        </select>
+        <input type="number" min="0.0001" step="any" data-recipe-field="qty_per_unit"
+          value="${line.qty_per_unit != null && line.qty_per_unit !== "" ? escAttr(String(line.qty_per_unit)) : ""}"
+          placeholder="Qty" aria-label="Quantity">
+        <span class="recipe-line-unit">${esc(unit)}</span>
+        <button type="button" class="btn-icon danger" data-remove-recipe-line="${index}" title="Remove">
+          &times;
+        </button>
+      </div>`;
+    })
+    .join("");
+  updateRecipeCostPreview();
+}
+
+function syncRecipeDraftFromDom() {
+  const lines = [];
+  document.querySelectorAll("#recipe-lines .recipe-line").forEach((row) => {
+    const ingredientId = row.querySelector('[data-recipe-field="ingredient_id"]')?.value;
+    const qty = row.querySelector('[data-recipe-field="qty_per_unit"]')?.value;
+    lines.push({
+      ingredient_id: ingredientId ? Number(ingredientId) : "",
+      qty_per_unit: qty,
+    });
+  });
+  state.recipeDraft = lines;
+}
+
+function addRecipeLine() {
+  syncRecipeDraftFromDom();
+  state.recipeDraft.push({ ingredient_id: "", qty_per_unit: "" });
+  renderRecipeLines();
+}
+
+function removeRecipeLine(index) {
+  syncRecipeDraftFromDom();
+  state.recipeDraft.splice(index, 1);
+  if (!state.recipeDraft.length) {
+    state.recipeDraft.push({ ingredient_id: "", qty_per_unit: "" });
+  }
+  renderRecipeLines();
+}
+
+function collectRecipePayload() {
+  syncRecipeDraftFromDom();
+  const lines = [];
+  for (const line of state.recipeDraft) {
+    const ingredientId = Number(line.ingredient_id);
+    const qty = parseFloat(line.qty_per_unit);
+    if (!ingredientId && (line.qty_per_unit === "" || line.qty_per_unit == null)) {
+      continue;
+    }
+    if (!ingredientId || !(qty > 0)) {
+      return { error: "Each recipe line needs an ingredient and a quantity greater than zero" };
+    }
+    lines.push({ ingredient_id: ingredientId, qty_per_unit: qty });
+  }
+  if (!lines.length) {
+    return { error: "Add at least one ingredient to the recipe" };
+  }
+  const ids = lines.map((l) => l.ingredient_id);
+  if (new Set(ids).size !== ids.length) {
+    return { error: "Duplicate ingredients in the recipe" };
+  }
+  return { lines };
+}
+
+function updateRecipeCostPreview() {
+  const costEl = document.getElementById("product-recipe-cost");
+  const marginEl = document.getElementById("product-recipe-margin-hint");
+  if (!costEl) return;
+  syncRecipeDraftFromDom();
+  let total = 0;
+  for (const line of state.recipeDraft) {
+    const ing = state.ingredients.find((i) => i.id === Number(line.ingredient_id));
+    const qty = parseFloat(line.qty_per_unit);
+    if (!ing || !(qty > 0) || ing.cost_per_unit == null) continue;
+    total += qty * Number(ing.cost_per_unit);
+  }
+  costEl.value = String(Math.round(total * 100) / 100);
+  if (marginEl) {
+    const sell = parseFloat(document.getElementById("product-price")?.value) || 0;
+    if (sell > 0) {
+      const margin = Math.round((sell - total) * 100) / 100;
+      const pct = Math.round((margin / sell) * 1000) / 10;
+      marginEl.textContent = `Margin ${fmt.format(margin)} (${pct}%)`;
+    } else {
+      marginEl.textContent = "Enter a sell price to see margin";
+    }
+  }
 }
 
 function openAddProduct() {
-  loadCategories()
-    .then(() => api("/api/products"))
-    .then((products) => {
+  Promise.all([loadCategories(), api("/api/products"), ensureIngredientsLoaded(true)])
+    .then(([, products]) => {
       state.products = products;
       if (!state.categories.length) {
         toast("Add a category in Admin before creating products", "error");
@@ -2041,7 +2499,11 @@ function openAddProduct() {
       document.getElementById("product-quantity-label").textContent = "Initial Quantity";
       document.getElementById("product-reorder").value = "10";
       document.getElementById("product-cost-price").value = "0";
+      document.getElementById("product-uses-recipe").checked = false;
+      state.recipeDraft = [{ ingredient_id: "", qty_per_unit: "" }];
       populateCategorySelects();
+      renderRecipeLines();
+      updateProductStockFields();
       showModal("product-modal");
     })
     .catch((e) => toast(e.message, "error"));
@@ -2049,7 +2511,10 @@ function openAddProduct() {
 
 async function openEditProduct(id) {
   try {
-    const p = await api(`/api/products/${id}`);
+    const [p] = await Promise.all([
+      api(`/api/products/${id}`),
+      ensureIngredientsLoaded(true),
+    ]);
     document.getElementById("product-modal-title").textContent = "Edit Product";
     document.getElementById("product-id").value = p.id;
     populateCategorySelects();
@@ -2057,10 +2522,19 @@ async function openEditProduct(id) {
     document.getElementById("product-category").value = p.category;
     document.getElementById("product-price").value = p.price;
     document.getElementById("product-cost-price").value = p.cost_price != null ? p.cost_price : 0;
-    document.getElementById("product-quantity").value = p.quantity;
+    document.getElementById("product-quantity").value = p.uses_recipe ? 0 : p.quantity;
     document.getElementById("product-quantity-label").textContent = "Stock Quantity";
     document.getElementById("product-reorder").value = p.reorder_level;
     document.getElementById("product-description").value = p.description;
+    document.getElementById("product-uses-recipe").checked = !!p.uses_recipe;
+    state.recipeDraft =
+      p.uses_recipe && Array.isArray(p.recipe) && p.recipe.length
+        ? p.recipe.map((line) => ({
+            ingredient_id: line.ingredient_id,
+            qty_per_unit: line.qty_per_unit,
+          }))
+        : [{ ingredient_id: "", qty_per_unit: "" }];
+    renderRecipeLines();
     updateProductStockFields();
     showModal("product-modal");
   } catch (e) {
@@ -2079,6 +2553,7 @@ async function saveProduct(e) {
   const id = document.getElementById("product-id").value;
   const name = document.getElementById("product-name").value.trim();
   const category = document.getElementById("product-category").value;
+  const usesRecipe = productUsesRecipeChecked();
 
   if (!name) {
     toast("Enter a product name", "error");
@@ -2088,16 +2563,35 @@ async function saveProduct(e) {
     toast("Choose a category", "error");
     return;
   }
+  if (usesRecipe && categoryUsesCups(category)) {
+    toast("Recipe products cannot use a cup-stock category", "error");
+    return;
+  }
 
   const payload = {
     name,
     category,
     price: parseFloat(document.getElementById("product-price").value),
     cost_price: parseFloat(document.getElementById("product-cost-price").value) || 0,
-    reorder_level: parseInt(document.getElementById("product-reorder").value, 10),
+    reorder_level: parseInt(document.getElementById("product-reorder").value, 10) || 0,
     description: document.getElementById("product-description").value,
     quantity: parseInt(document.getElementById("product-quantity").value, 10) || 0,
+    uses_recipe: usesRecipe,
   };
+
+  if (usesRecipe) {
+    const { lines, error } = collectRecipePayload();
+    if (error) {
+      toast(error, "error");
+      return;
+    }
+    payload.recipe = lines;
+    payload.quantity = 0;
+    payload.reorder_level = 0;
+    payload.cost_price = 0;
+  } else {
+    payload.recipe = [];
+  }
 
   try {
     if (id) {
@@ -2345,17 +2839,21 @@ function renderSellCategories() {
 
 function populateProductSelects() {
   const sellProducts = getSellProducts().filter((p) => p.quantity > 0);
-  const stockProducts = state.products.filter((p) => !p.uses_cup_stock);
+  const stockProducts = state.products.filter((p) => !p.uses_cup_stock && !p.uses_recipe);
 
   const sellSelect = document.getElementById("sell-product");
-  sellSelect.innerHTML =
-    '<option value="">Choose a product...</option>' +
-    sellProducts
-      .map((p) => {
-        const stockText = p.uses_cup_stock ? `${p.quantity} cups` : `${p.quantity} in stock`;
-        return `<option value="${p.id}">${esc(p.name)} — ${stockText}</option>`;
-      })
-      .join("");
+  if (sellSelect) {
+    sellSelect.innerHTML =
+      '<option value="">Choose a product...</option>' +
+      sellProducts
+        .map((p) => {
+          let stockText = `${p.quantity} in stock`;
+          if (p.uses_cup_stock) stockText = `${p.quantity} cups`;
+          else if (p.uses_recipe) stockText = `${p.quantity} makeable`;
+          return `<option value="${p.id}">${esc(p.name)} — ${stockText}</option>`;
+        })
+        .join("");
+  }
 
   ["restock-product", "adjust-product"].forEach((id) => {
     const sel = document.getElementById(id);
@@ -2366,6 +2864,23 @@ function populateProductSelects() {
         .map((p) => `<option value="${p.id}">${esc(p.name)} (${p.quantity} units)</option>`)
         .join("");
   });
+
+  populateIngredientRestockSelect();
+}
+
+function populateIngredientRestockSelect() {
+  const sel = document.getElementById("ingredient-restock-select");
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML =
+    '<option value="">Choose an ingredient...</option>' +
+    (state.ingredients || [])
+      .map(
+        (ing) =>
+          `<option value="${ing.id}">${esc(ing.name)} (${fmtNum.format(ing.quantity)} ${esc(ing.unit)})</option>`
+      )
+      .join("");
+  if (current) sel.value = current;
 }
 
 function initPosShortcuts() {
@@ -2499,9 +3014,14 @@ function updateSellPreview() {
   preview.hidden = false;
   document.getElementById("preview-price").textContent = fmt.format(product.price);
   const available = getAvailableUnits(product);
+  const unitWord = product.uses_cup_stock
+    ? "cups"
+    : product.uses_recipe
+      ? "makeable"
+      : "units";
   document.getElementById("preview-stock").textContent =
     available > 0
-      ? `${available} ${product.uses_cup_stock ? "cups" : "units"} available`
+      ? `${available} ${unitWord} available`
       : "All in cart";
   document.getElementById("preview-category").textContent = product.category;
 
@@ -2523,7 +3043,14 @@ function adjustQty(delta) {
 function addToCart(productId, qty = null) {
   const product = state.products.find((p) => p.id === productId);
   if (!product || product.quantity <= 0) {
-    toast(product?.uses_cup_stock ? "No cups left in stock" : "Product out of stock", "error");
+    toast(
+      product?.uses_cup_stock
+        ? "No cups left in stock"
+        : product?.uses_recipe
+          ? "Not enough ingredients to make this"
+          : "Product out of stock",
+      "error"
+    );
     return;
   }
 
@@ -2531,11 +3058,16 @@ function addToCart(productId, qty = null) {
   const existing = state.cart.find((c) => c.product_id === productId);
   const currentInCart = existing ? existing.quantity : 0;
   const available = getAvailableUnits(product);
+  const unitLabel = product.uses_cup_stock
+    ? "cup(s)"
+    : product.uses_recipe
+      ? "serving(s)"
+      : "unit(s)";
 
   if (addQty > available) {
     toast(
       available > 0
-        ? `Only ${available} more ${product.uses_cup_stock ? "cup(s)" : "unit(s)"} available for ${product.name}`
+        ? `Only ${available} more ${unitLabel} available for ${product.name}`
         : product.uses_cup_stock
           ? "No cups left for this sale"
           : `${product.name} is fully in the cart`,
@@ -2547,6 +3079,7 @@ function addToCart(productId, qty = null) {
   if (existing) {
     existing.quantity += addQty;
     existing.uses_cup_stock = product.uses_cup_stock;
+    existing.uses_recipe = product.uses_recipe;
   } else {
     state.cart.push({
       product_id: productId,
@@ -2555,6 +3088,7 @@ function addToCart(productId, qty = null) {
       price: product.price,
       quantity: addQty,
       maxStock: available + addQty,
+      uses_recipe: !!product.uses_recipe,
       uses_cup_stock: product.uses_cup_stock,
     });
   }
@@ -3886,21 +4420,322 @@ function initCashNoteInputs() {
   });
 }
 
+// ── Ingredients ────────────────────────────────────────────────────────────
+
+async function loadIngredients() {
+  try {
+    const search = document.getElementById("ingredient-search")?.value?.trim() || "";
+    const lowOnly = document.getElementById("ingredient-low-stock-filter")?.checked;
+    const params = new URLSearchParams();
+    if (search) params.set("search", search);
+    if (lowOnly) params.set("low_stock", "1");
+    const qs = params.toString();
+    state.ingredients = await api(`/api/ingredients${qs ? `?${qs}` : ""}`);
+    renderIngredientsTable();
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+function renderIngredientsTable() {
+  const tbody = document.getElementById("ingredients-table-body");
+  const countEl = document.getElementById("ingredients-count");
+  if (!tbody) return;
+  const items = state.ingredients || [];
+  if (countEl) countEl.textContent = `${items.length} ingredient${items.length === 1 ? "" : "s"}`;
+
+  const role = state.currentUser?.role;
+  const canManage = role === "admin" || role === "stock_manager";
+  const showCost = canViewCost();
+
+  if (!items.length) {
+    tbody.innerHTML = `<tr><td colspan="7">${emptyState(
+      UI_ICONS.box,
+      "No ingredients yet",
+      "Add raw materials like beetroot, sugar, or burger buns."
+    )}</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = items
+    .map((ing) => {
+      const actions = canManage
+        ? `<div class="action-group">
+            <button class="btn-icon" title="Edit" onclick="openEditIngredient(${ing.id})">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            </button>
+            <button class="btn-icon danger" title="Delete" onclick="openDeleteIngredient(${ing.id}, '${escAttr(ing.name)}')">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+          </div>`
+        : `<span class="text-muted">View only</span>`;
+      return `
+      <tr>
+        <td>${productCell(ing.name, esc(ing.unit))}</td>
+        <td>${esc(ing.unit)}</td>
+        <td><strong>${fmtNum.format(ing.quantity)}</strong></td>
+        <td>${showCost && ing.cost_per_unit != null ? fmt.format(ing.cost_per_unit) : "—"}</td>
+        <td>${fmtNum.format(ing.reorder_level)}</td>
+        <td><span class="badge badge-stock ${ing.stock_status}">${stockLabel(ing)}</span></td>
+        <td>${actions}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function openAddIngredient() {
+  document.getElementById("ingredient-modal-title").textContent = "Add Ingredient";
+  document.getElementById("ingredient-form").reset();
+  document.getElementById("ingredient-id").value = "";
+  document.getElementById("ingredient-unit").value = "g";
+  document.getElementById("ingredient-quantity").value = "0";
+  document.getElementById("ingredient-reorder").value = "0";
+  document.getElementById("ingredient-cost").value = "0";
+  const qtyGroup = document.getElementById("ingredient-qty-group");
+  if (qtyGroup) qtyGroup.hidden = false;
+  showModal("ingredient-modal");
+}
+
+async function openEditIngredient(id) {
+  try {
+    const ing = await api(`/api/ingredients/${id}`);
+    document.getElementById("ingredient-modal-title").textContent = "Edit Ingredient";
+    document.getElementById("ingredient-id").value = ing.id;
+    document.getElementById("ingredient-name").value = ing.name;
+    document.getElementById("ingredient-unit").value = ing.unit;
+    document.getElementById("ingredient-reorder").value = ing.reorder_level;
+    document.getElementById("ingredient-cost").value =
+      ing.cost_per_unit != null ? ing.cost_per_unit : 0;
+    const qtyGroup = document.getElementById("ingredient-qty-group");
+    if (qtyGroup) qtyGroup.hidden = true;
+    showModal("ingredient-modal");
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+function openDeleteIngredient(id, name) {
+  state.deleteIngredientId = id;
+  document.getElementById("delete-ingredient-name").textContent = name;
+  showModal("delete-ingredient-modal");
+}
+
+async function saveIngredient(e) {
+  e.preventDefault();
+  const id = document.getElementById("ingredient-id").value;
+  const payload = {
+    name: document.getElementById("ingredient-name").value.trim(),
+    unit: document.getElementById("ingredient-unit").value,
+    reorder_level: parseFloat(document.getElementById("ingredient-reorder").value) || 0,
+    cost_per_unit: parseFloat(document.getElementById("ingredient-cost").value) || 0,
+  };
+  if (!payload.name) {
+    toast("Enter an ingredient name", "error");
+    return;
+  }
+  if (!id) {
+    payload.quantity = parseFloat(document.getElementById("ingredient-quantity").value) || 0;
+  }
+  try {
+    if (id) {
+      await api(`/api/ingredients/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      toast("Ingredient updated");
+    } else {
+      await api("/api/ingredients", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      toast("Ingredient added");
+    }
+    hideModal("ingredient-modal");
+    loadIngredients();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function confirmDeleteIngredient() {
+  try {
+    await api(`/api/ingredients/${state.deleteIngredientId}`, { method: "DELETE" });
+    toast("Ingredient deleted");
+    hideModal("delete-ingredient-modal");
+    loadIngredients();
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+function updateIngredientRestockPreview() {
+  const preview = document.getElementById("ingredient-restock-preview");
+  const id = parseInt(document.getElementById("ingredient-restock-select")?.value, 10);
+  const ing = (state.ingredients || []).find((i) => i.id === id);
+  if (!preview || !ing) {
+    if (preview) preview.hidden = true;
+    return;
+  }
+  const qty = parseFloat(document.getElementById("ingredient-restock-quantity")?.value) || 0;
+  const costInput = document.getElementById("ingredient-restock-cost");
+  if (costInput && document.activeElement !== costInput && ing.cost_per_unit != null) {
+    if (!costInput.dataset.touched) {
+      costInput.value = String(ing.cost_per_unit);
+    }
+  }
+  preview.hidden = false;
+  document.getElementById("ingredient-restock-preview-name").textContent = ing.name;
+  document.getElementById("ingredient-restock-preview-meta").textContent =
+    `${ing.unit} · cost ${fmt.format(ing.cost_per_unit || 0)} / ${ing.unit}`;
+  document.getElementById("ingredient-restock-preview-current").textContent =
+    `${fmtNum.format(ing.quantity)} ${ing.unit}`;
+  document.getElementById("ingredient-restock-preview-after").textContent =
+    `${fmtNum.format(ing.quantity + qty)} ${ing.unit}`;
+}
+
+async function submitIngredientRestock(e) {
+  e.preventDefault();
+  const ingredientId = parseInt(document.getElementById("ingredient-restock-select").value, 10);
+  const quantity = parseFloat(document.getElementById("ingredient-restock-quantity").value);
+  const unitCost = parseFloat(document.getElementById("ingredient-restock-cost").value) || 0;
+  const notes = document.getElementById("ingredient-restock-notes").value;
+  const expiryDate = document.getElementById("ingredient-restock-expiry")?.value || "";
+  if (!ingredientId || !(quantity > 0)) {
+    toast("Choose an ingredient and quantity", "error");
+    return;
+  }
+  try {
+    const payload = {
+      ingredient_id: ingredientId,
+      quantity,
+      unit_cost: unitCost,
+      notes,
+    };
+    if (expiryDate) payload.expiry_date = expiryDate;
+    const updated = await api("/api/ingredients/restock", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    const idx = state.ingredients.findIndex((i) => i.id === updated.id);
+    if (idx >= 0) state.ingredients[idx] = updated;
+    else state.ingredients.push(updated);
+    toast(`Added ${quantity} ${updated.unit} of ${updated.name}`);
+    document.getElementById("ingredient-restock-notes").value = "";
+    const expiryInput = document.getElementById("ingredient-restock-expiry");
+    if (expiryInput) expiryInput.value = "";
+    const costInput = document.getElementById("ingredient-restock-cost");
+    if (costInput) delete costInput.dataset.touched;
+    populateIngredientRestockSelect();
+    updateIngredientRestockPreview();
+    renderRestockLowStock();
+    loadLotsPanel();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
 // ── Restock ────────────────────────────────────────────────────────────────
+
+function formatLotDate(iso) {
+  if (!iso) return "—";
+  const day = String(iso).slice(0, 10);
+  return day || "—";
+}
+
+function lotExpiryBadge(lot) {
+  if (!lot.expiry_date) return `<span class="text-muted">—</span>`;
+  const today = new Date().toISOString().slice(0, 10);
+  const expired = lot.expiry_date < today;
+  const soon =
+    !expired &&
+    lot.expiry_date <=
+      new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+  const cls = expired ? "lot-expiry expired" : soon ? "lot-expiry soon" : "lot-expiry";
+  return `<span class="${cls}">${esc(lot.expiry_date)}</span>`;
+}
+
+async function loadLotsPanel() {
+  const body = document.getElementById("lots-table-body");
+  if (!body) return;
+  const pool = document.getElementById("lots-pool-filter")?.value || "";
+  const params = new URLSearchParams();
+  if (pool) params.set("pool", pool);
+  params.set("limit", "200");
+  try {
+    const lots = await api(`/api/lots?${params.toString()}`);
+    state.lots = lots;
+    renderLotsTable(lots);
+  } catch (err) {
+    body.innerHTML = `<tr><td colspan="7" class="text-muted">${esc(err.message)}</td></tr>`;
+  }
+}
+
+function renderLotsTable(lots) {
+  const body = document.getElementById("lots-table-body");
+  if (!body) return;
+  if (!lots.length) {
+    body.innerHTML = `<tr><td colspan="7" class="text-muted">No open lots</td></tr>`;
+    return;
+  }
+  body.innerHTML = lots
+    .map(
+      (lot) => `
+    <tr>
+      <td><strong>${esc(lot.item_name || "—")}</strong><div class="text-muted">#${lot.id} · ${esc(lot.source || "")}</div></td>
+      <td>${esc(lot.pool || "")}</td>
+      <td>${esc(formatLotDate(lot.received_at))}</td>
+      <td>${lotExpiryBadge(lot)}</td>
+      <td>${fmtNum.format(lot.qty_remaining)}</td>
+      <td>${fmt.format(lot.unit_cost || 0)}</td>
+      <td>${fmt.format(lot.value || 0)}</td>
+    </tr>`
+    )
+    .join("");
+}
+
+async function loadAdjustLotsForProduct(productId) {
+  const group = document.getElementById("adjust-lot-group");
+  const select = document.getElementById("adjust-lot");
+  if (!group || !select) return;
+  select.innerHTML = `<option value="">FEFO — oldest / soonest expiry first</option>`;
+  if (!productId) {
+    group.hidden = true;
+    return;
+  }
+  try {
+    const lots = await api(`/api/lots?pool=product&ref_id=${productId}`);
+    group.hidden = false;
+    lots.forEach((lot) => {
+      const exp = lot.expiry_date ? ` · exp ${lot.expiry_date}` : "";
+      const opt = document.createElement("option");
+      opt.value = String(lot.id);
+      opt.textContent = `#${lot.id} · ${fmtNum.format(lot.qty_remaining)} left${exp} · ${fmt.format(lot.unit_cost || 0)}`;
+      select.appendChild(opt);
+    });
+  } catch {
+    group.hidden = true;
+  }
+}
 
 async function loadRestockView() {
   try {
-    const [products, cups] = await Promise.all([
+    const [products, cups, ingredients] = await Promise.all([
       api("/api/products"),
       api("/api/cups"),
+      api("/api/ingredients"),
     ]);
     state.products = products;
     state.cupInventory = cups;
+    state.ingredients = ingredients;
     populateProductSelects();
     renderCupRestock();
     renderRestockLowStock();
     updateRestockPreview();
     updateAdjustPreview();
+    updateIngredientRestockPreview();
+    loadLotsPanel();
+    const adjustId = parseInt(document.getElementById("adjust-product")?.value, 10);
+    if (adjustId) loadAdjustLotsForProduct(adjustId);
   } catch (e) {
     toast(e.message, "error");
   }
@@ -3931,16 +4766,22 @@ async function submitCupRestock(e) {
   e.preventDefault();
   const quantity = parseInt(document.getElementById("cup-restock-quantity").value, 10);
   const notes = document.getElementById("cup-restock-notes").value;
+  const expiryDate = document.getElementById("cup-restock-expiry")?.value || "";
 
   try {
+    const payload = { quantity, notes };
+    if (expiryDate) payload.expiry_date = expiryDate;
     state.cupInventory = await api("/api/cups/restock", {
       method: "POST",
-      body: JSON.stringify({ quantity, notes }),
+      body: JSON.stringify(payload),
     });
     toast(`Added ${quantity} cups`);
     document.getElementById("cup-restock-notes").value = "";
+    const expiryInput = document.getElementById("cup-restock-expiry");
+    if (expiryInput) expiryInput.value = "";
     renderCupRestock();
     renderRestockLowStock();
+    loadLotsPanel();
     await loadProducts();
   } catch (err) {
     toast(err.message, "error");
@@ -3952,8 +4793,27 @@ function renderRestockLowStock() {
   if (!el) return;
 
   const low = state.products
-    .filter((p) => !p.uses_cup_stock && (p.stock_status === "low" || p.stock_status === "out"))
+    .filter(
+      (p) =>
+        !p.uses_cup_stock &&
+        !p.uses_recipe &&
+        (p.stock_status === "low" || p.stock_status === "out")
+    )
     .sort((a, b) => a.quantity - b.quantity);
+
+  const lowIngredients = (state.ingredients || [])
+    .filter((ing) => ing.stock_status === "low" || ing.stock_status === "out")
+    .sort((a, b) => a.quantity - b.quantity)
+    .map((ing) => ({
+      id: ing.id,
+      name: ing.name,
+      category: `Ingredient · ${ing.unit}`,
+      quantity: ing.quantity,
+      reorder_level: ing.reorder_level,
+      stock_status: ing.stock_status,
+      is_ingredient: true,
+      unit: ing.unit,
+    }));
 
   const cupItems = [];
   if (state.cupInventory && ["low", "out"].includes(state.cupInventory.stock_status)) {
@@ -3968,7 +4828,7 @@ function renderRestockLowStock() {
     });
   }
 
-  const allLow = [...cupItems, ...low];
+  const allLow = [...cupItems, ...lowIngredients, ...low];
 
   if (!allLow.length) {
     el.innerHTML = emptyState(UI_ICONS.check, "All stocked up", "No products need restocking right now.", true);
@@ -3976,9 +4836,20 @@ function renderRestockLowStock() {
   }
 
   el.innerHTML = allLow
-    .map(
-      (p) => `
-    <button type="button" class="restock-pick-item" onclick="${p.is_cup_pool ? "document.getElementById('cup-restock-quantity')?.focus()" : `selectRestockProduct(${p.id})`}">
+    .map((p) => {
+      let onclick = `selectRestockProduct(${p.id})`;
+      if (p.is_cup_pool) {
+        onclick = "document.getElementById('cup-restock-quantity')?.focus()";
+      } else if (p.is_ingredient) {
+        onclick = `selectIngredientRestock(${p.id})`;
+      }
+      const badge = p.is_cup_pool
+        ? `${p.quantity} cups`
+        : p.is_ingredient
+          ? `${p.quantity} ${p.unit}`
+          : `${p.quantity} left`;
+      return `
+    <button type="button" class="restock-pick-item" onclick="${onclick}">
       <div class="restock-pick-info">
         <div class="product-avatar product-avatar-sm">${esc(productInitials(p.name))}</div>
         <div>
@@ -3986,10 +4857,17 @@ function renderRestockLowStock() {
           <span>${esc(p.category)}${p.is_cup_pool ? "" : ` · reorder ${p.reorder_level}`}</span>
         </div>
       </div>
-      <span class="badge badge-stock ${p.stock_status}">${p.is_cup_pool ? `${p.quantity} cups` : `${p.quantity} left`}</span>
-    </button>`
-    )
+      <span class="badge badge-stock ${p.stock_status}">${badge}</span>
+    </button>`;
+    })
     .join("");
+}
+
+function selectIngredientRestock(id) {
+  const sel = document.getElementById("ingredient-restock-select");
+  if (sel) sel.value = String(id);
+  updateIngredientRestockPreview();
+  document.getElementById("ingredient-restock-quantity")?.focus();
 }
 
 function selectRestockProduct(id) {
@@ -4079,14 +4957,17 @@ async function submitRestock(e) {
   e.preventDefault();
   try {
     const costInput = document.getElementById("restock-cost-price");
+    const expiryDate = document.getElementById("restock-expiry")?.value || "";
+    const payload = {
+      product_id: parseInt(document.getElementById("restock-product").value, 10),
+      quantity: parseInt(document.getElementById("restock-quantity").value, 10),
+      unit_price: parseFloat(costInput?.value) || 0,
+      notes: document.getElementById("restock-notes").value,
+    };
+    if (expiryDate) payload.expiry_date = expiryDate;
     const result = await api("/api/restock", {
       method: "POST",
-      body: JSON.stringify({
-        product_id: parseInt(document.getElementById("restock-product").value, 10),
-        quantity: parseInt(document.getElementById("restock-quantity").value, 10),
-        unit_price: parseFloat(costInput?.value) || 0,
-        notes: document.getElementById("restock-notes").value,
-      }),
+      body: JSON.stringify(payload),
     });
     toast(`Restocked ${result.name} — now ${result.quantity} units`);
     document.getElementById("restock-form").reset();
@@ -4105,16 +4986,21 @@ async function submitRestock(e) {
 async function submitAdjust(e) {
   e.preventDefault();
   try {
+    const lotId = document.getElementById("adjust-lot")?.value;
+    const payload = {
+      product_id: parseInt(document.getElementById("adjust-product").value, 10),
+      new_quantity: parseInt(document.getElementById("adjust-quantity").value, 10),
+      notes: document.getElementById("adjust-notes").value,
+    };
+    if (lotId) payload.lot_id = parseInt(lotId, 10);
     const result = await api("/api/adjust", {
       method: "POST",
-      body: JSON.stringify({
-        product_id: parseInt(document.getElementById("adjust-product").value, 10),
-        new_quantity: parseInt(document.getElementById("adjust-quantity").value, 10),
-        notes: document.getElementById("adjust-notes").value,
-      }),
+      body: JSON.stringify(payload),
     });
     toast(`Stock updated — ${result.name} now has ${result.quantity} units`);
     document.getElementById("adjust-form").reset();
+    const lotGroup = document.getElementById("adjust-lot-group");
+    if (lotGroup) lotGroup.hidden = true;
     loadRestockView();
   } catch (err) {
     toast(err.message, "error");
@@ -4126,6 +5012,7 @@ document.getElementById("adjust-product")?.addEventListener("change", () => {
   const p = state.products.find((x) => x.id === id);
   if (p) document.getElementById("adjust-quantity").value = p.quantity;
   updateAdjustPreview();
+  loadAdjustLotsForProduct(id || null);
 });
 
 document.getElementById("adjust-quantity")?.addEventListener("input", updateAdjustPreview);
@@ -5864,14 +6751,43 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btn-add-product")?.addEventListener("click", openAddProduct);
   document.getElementById("product-form")?.addEventListener("submit", saveProduct);
   document.getElementById("confirm-delete")?.addEventListener("click", confirmDelete);
+  document.getElementById("btn-add-ingredient")?.addEventListener("click", openAddIngredient);
+  document.getElementById("ingredient-form")?.addEventListener("submit", saveIngredient);
+  document.getElementById("confirm-delete-ingredient")?.addEventListener("click", confirmDeleteIngredient);
+  document.getElementById("product-uses-recipe")?.addEventListener("change", updateProductStockFields);
+  document.getElementById("btn-add-recipe-line")?.addEventListener("click", addRecipeLine);
+  document.getElementById("product-price")?.addEventListener("input", updateRecipeCostPreview);
+  document.getElementById("recipe-lines")?.addEventListener("change", (e) => {
+    if (e.target.matches("[data-recipe-field]")) {
+      syncRecipeDraftFromDom();
+      if (e.target.dataset.recipeField === "ingredient_id") renderRecipeLines();
+      else updateRecipeCostPreview();
+    }
+  });
+  document.getElementById("recipe-lines")?.addEventListener("input", (e) => {
+    if (e.target.matches('[data-recipe-field="qty_per_unit"]')) {
+      updateRecipeCostPreview();
+    }
+  });
+  document.getElementById("recipe-lines")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-remove-recipe-line]");
+    if (!btn) return;
+    removeRecipeLine(Number(btn.dataset.removeRecipeLine));
+  });
 
   const debouncedLoadProducts = debounce(loadProducts, 300);
-  document.getElementById("product-search").addEventListener("input", () => {
+  document.getElementById("product-search")?.addEventListener("input", () => {
     showTableSkeleton("products-table-body", 8);
     debouncedLoadProducts();
   });
-  document.getElementById("product-category-filter").addEventListener("change", loadProducts);
-  document.getElementById("low-stock-filter").addEventListener("change", loadProducts);
+  document.getElementById("product-category-filter")?.addEventListener("change", loadProducts);
+  document.getElementById("low-stock-filter")?.addEventListener("change", loadProducts);
+  const debouncedLoadIngredients = debounce(loadIngredients, 300);
+  document.getElementById("ingredient-search")?.addEventListener("input", () => {
+    showTableSkeleton("ingredients-table-body", 7);
+    debouncedLoadIngredients();
+  });
+  document.getElementById("ingredient-low-stock-filter")?.addEventListener("change", loadIngredients);
   document.getElementById("product-name")?.addEventListener("input", () => {
     syncCategoryFromProductName();
     updateProductStockFields();
@@ -5883,6 +6799,12 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("product-category")?.addEventListener("change", updateProductStockFields);
 
   document.getElementById("cup-restock-form")?.addEventListener("submit", submitCupRestock);
+  document.getElementById("ingredient-restock-form")?.addEventListener("submit", submitIngredientRestock);
+  document.getElementById("ingredient-restock-select")?.addEventListener("change", updateIngredientRestockPreview);
+  document.getElementById("ingredient-restock-quantity")?.addEventListener("input", updateIngredientRestockPreview);
+  document.getElementById("ingredient-restock-cost")?.addEventListener("input", (e) => {
+    e.target.dataset.touched = "1";
+  });
   document.getElementById("cup-restock-quantity")?.addEventListener("input", updateCupRestockPreview);
   document.getElementById("cup-qty-minus")?.addEventListener("click", () => {
     const input = document.getElementById("cup-restock-quantity");
@@ -5968,6 +6890,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("restock-form")?.addEventListener("submit", submitRestock);
   document.getElementById("adjust-form")?.addEventListener("submit", submitAdjust);
+  document.getElementById("lots-pool-filter")?.addEventListener("change", loadLotsPanel);
+  document.getElementById("lots-refresh-btn")?.addEventListener("click", loadLotsPanel);
 
   document.getElementById("history-type-filter").addEventListener("change", loadHistory);
   document.getElementById("history-seller-filter")?.addEventListener("change", loadHistory);
@@ -6041,10 +6965,18 @@ document.addEventListener("DOMContentLoaded", () => {
     if (e.key === "Escape") closeBusinessSwitcher();
   });
   renderBusinessSwitcher(state.memberships, state.currentBusiness?.id);
+  applyBusinessBranding(state.currentBusiness);
   document.getElementById("btn-add-business")?.addEventListener("click", openAddBusiness);
   document.getElementById("business-form")?.addEventListener("submit", saveBusiness);
   document.getElementById("business-edit-form")?.addEventListener("submit", saveBusinessEdit);
   document.getElementById("confirm-delete-business")?.addEventListener("click", confirmDeleteBusiness);
+  document.getElementById("branding-colors-form")?.addEventListener("submit", saveBrandingColors);
+  document.getElementById("btn-branding-reset-colors")?.addEventListener("click", resetBrandingColors);
+  document.getElementById("btn-upload-logo")?.addEventListener("click", uploadBusinessLogo);
+  document.getElementById("btn-remove-logo")?.addEventListener("click", removeBusinessLogo);
+  document.getElementById("branding-logo-file")?.addEventListener("change", onBrandingLogoFileChange);
+  bindBrandingColorPair("branding-primary", "branding-primary-hex");
+  bindBrandingColorPair("branding-accent", "branding-accent-hex");
   document.getElementById("btn-activity-refresh")?.addEventListener("click", loadActivityLogs);
   document.getElementById("activity-from")?.addEventListener("change", loadActivityLogs);
   document.getElementById("activity-to")?.addEventListener("change", loadActivityLogs);

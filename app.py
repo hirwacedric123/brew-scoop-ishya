@@ -13,6 +13,7 @@ load_env_file()
 
 from flask import Flask, jsonify, redirect, render_template, request, g, session, url_for
 from werkzeug.security import generate_password_hash
+from werkzeug.utils import secure_filename
 
 from auth import (
     ROLES,
@@ -48,6 +49,10 @@ from activity import (
     log_activity,
 )
 from business import (
+    DEFAULT_ACCENT_COLOR,
+    DEFAULT_PRIMARY_COLOR,
+    LOGO_ALLOWED_EXTENSIONS,
+    business_uploads_dir,
     create_business,
     current_business_id,
     default_business_name,
@@ -57,6 +62,7 @@ from business import (
     init_business_tables,
     list_switchable_businesses,
     list_user_memberships,
+    normalize_hex_color,
     platform_admin_required,
     row_to_business,
     set_session_business,
@@ -68,6 +74,7 @@ from password_reset import (
     mark_reset_token_used,
     request_password_reset,
 )
+import fifo
 from reporting import (
     category_breakdown as _category_breakdown,
     extra_report_emails,
@@ -86,6 +93,7 @@ app.config["SECRET_KEY"] = os.environ.get(
     "BREW_SCOOP_SECRET_KEY", "dev-change-me-in-production"
 )
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=7)
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024  # 2 MB (logos)
 
 KIGALI_OFFSET = timedelta(hours=2)
 
@@ -461,7 +469,73 @@ def _migrate_db(db):
     if "cost_price" not in tx_cols:
         db.execute("ALTER TABLE transactions ADD COLUMN cost_price REAL")
 
+    _migrate_recipe_tables(db)
     _migrate_business_tenancy(db)
+    fifo.migrate_fifo_lots(
+        db, now_iso, category_uses_cups, _product_uses_recipe
+    )
+
+
+def _migrate_recipe_tables(db):
+    """Ingredients catalog, recipe lines, and products.uses_recipe."""
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS ingredients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            business_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            unit TEXT NOT NULL CHECK(unit IN ('g', 'ml', 'pcs')),
+            quantity REAL NOT NULL DEFAULT 0 CHECK(quantity >= 0),
+            reorder_level REAL NOT NULL DEFAULT 0 CHECK(reorder_level >= 0),
+            cost_per_unit REAL NOT NULL DEFAULT 0 CHECK(cost_per_unit >= 0),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(business_id, name COLLATE NOCASE)
+        );
+
+        CREATE TABLE IF NOT EXISTS ingredient_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            business_id INTEGER NOT NULL,
+            ingredient_id INTEGER NOT NULL,
+            type TEXT NOT NULL CHECK(
+                type IN ('restock', 'adjustment', 'sale', 'void_restore')
+            ),
+            quantity REAL NOT NULL,
+            unit_cost REAL,
+            total_cost REAL,
+            notes TEXT,
+            checkout_ref TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS product_recipes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            business_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            ingredient_id INTEGER NOT NULL,
+            qty_per_unit REAL NOT NULL CHECK(qty_per_unit > 0),
+            UNIQUE(product_id, ingredient_id),
+            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+            FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE RESTRICT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ingredients_business
+            ON ingredients(business_id);
+        CREATE INDEX IF NOT EXISTS idx_ingredient_tx_ingredient
+            ON ingredient_transactions(ingredient_id);
+        CREATE INDEX IF NOT EXISTS idx_ingredient_tx_checkout
+            ON ingredient_transactions(checkout_ref);
+        CREATE INDEX IF NOT EXISTS idx_product_recipes_product
+            ON product_recipes(product_id);
+        """
+    )
+
+    product_cols = _table_columns(db, "products")
+    if "uses_recipe" not in product_cols:
+        db.execute(
+            "ALTER TABLE products ADD COLUMN uses_recipe INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def _table_columns(db, table):
@@ -581,6 +655,42 @@ def _migrate_business_tenancy(db):
     _seed_service_tables(db, business_id)
     _seed_categories(db, business_id)
     _ensure_cup_inventory(db, business_id)
+    _migrate_business_branding(db)
+
+
+def _migrate_business_branding(db):
+    cols = _table_columns(db, "businesses")
+    alterations = []
+    if "logo_path" not in cols:
+        alterations.append("ALTER TABLE businesses ADD COLUMN logo_path TEXT")
+    if "primary_color" not in cols:
+        alterations.append(
+            "ALTER TABLE businesses ADD COLUMN primary_color TEXT "
+            f"NOT NULL DEFAULT '{DEFAULT_PRIMARY_COLOR}'"
+        )
+    if "accent_color" not in cols:
+        alterations.append(
+            "ALTER TABLE businesses ADD COLUMN accent_color TEXT "
+            f"NOT NULL DEFAULT '{DEFAULT_ACCENT_COLOR}'"
+        )
+    for sql in alterations:
+        try:
+            db.execute(sql)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+    db.execute(
+        """UPDATE businesses
+           SET primary_color = ?
+           WHERE primary_color IS NULL OR TRIM(primary_color) = ''""",
+        (DEFAULT_PRIMARY_COLOR,),
+    )
+    db.execute(
+        """UPDATE businesses
+           SET accent_color = ?
+           WHERE accent_color IS NULL OR TRIM(accent_color) = ''""",
+        (DEFAULT_ACCENT_COLOR,),
+    )
 
 
 def _migrate_cup_inventory_per_business(db, business_id):
@@ -1003,11 +1113,21 @@ COST_VIEW_ROLES = ("admin", "stock_manager", "supervisor")
 COST_EDIT_ROLES = ("admin", "stock_manager")
 
 
+INGREDIENT_UNITS = frozenset(("g", "ml", "pcs"))
+
+
 def _product_cost_value(row):
     keys = row.keys()
     if "cost_price" not in keys or row["cost_price"] is None:
         return 0.0
     return float(row["cost_price"])
+
+
+def _product_uses_recipe(row):
+    keys = row.keys()
+    if "uses_recipe" not in keys or row["uses_recipe"] is None:
+        return False
+    return bool(row["uses_recipe"])
 
 
 def _margin_from_prices(sell_price, cost_price):
@@ -1042,13 +1162,198 @@ def _can_view_cost(user=None):
     return role in COST_VIEW_ROLES or bool(row_to_user(user).get("is_platform_admin"))
 
 
-def row_to_product(row, category_cup_map=None, cup_inventory=None, include_cost=None):
+def _stock_status(quantity, reorder_level):
+    if quantity <= 0:
+        return "out"
+    if quantity <= reorder_level:
+        return "low"
+    return "ok"
+
+
+def row_to_ingredient(row, include_cost=None):
+    qty = float(row["quantity"] or 0)
+    reorder = float(row["reorder_level"] or 0)
+    data = {
+        "id": row["id"],
+        "name": row["name"],
+        "unit": row["unit"],
+        "quantity": round(qty, 4),
+        "reorder_level": round(reorder, 4),
+        "stock_status": _stock_status(qty, reorder),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+    if include_cost is None:
+        include_cost = _can_view_cost()
+    if include_cost:
+        data["cost_per_unit"] = round(float(row["cost_per_unit"] or 0), 4)
+    return data
+
+
+def _get_recipe_rows(db, product_id, business_id=None):
+    if business_id is None:
+        business_id = current_business_id()
+    return db.execute(
+        """SELECT r.id, r.product_id, r.ingredient_id, r.qty_per_unit,
+                  i.name AS ingredient_name, i.unit, i.quantity AS ingredient_quantity,
+                  i.cost_per_unit, i.reorder_level
+           FROM product_recipes r
+           JOIN ingredients i ON i.id = r.ingredient_id
+           WHERE r.product_id = ? AND r.business_id = ?
+           ORDER BY i.name COLLATE NOCASE ASC""",
+        (product_id, business_id),
+    ).fetchall()
+
+
+def _recipe_lines_payload(rows, include_cost=None):
+    if include_cost is None:
+        include_cost = _can_view_cost()
+    lines = []
+    for row in rows:
+        line = {
+            "id": row["id"],
+            "ingredient_id": row["ingredient_id"],
+            "ingredient_name": row["ingredient_name"],
+            "unit": row["unit"],
+            "qty_per_unit": round(float(row["qty_per_unit"]), 4),
+            "ingredient_quantity": round(float(row["ingredient_quantity"] or 0), 4),
+        }
+        if include_cost:
+            cpu = float(row["cost_per_unit"] or 0)
+            line["cost_per_unit"] = round(cpu, 4)
+            line["line_cost"] = round(float(row["qty_per_unit"]) * cpu, 4)
+        lines.append(line)
+    return lines
+
+
+def _recipe_unit_cost(rows):
+    total = 0.0
+    for row in rows:
+        total += float(row["qty_per_unit"]) * float(row["cost_per_unit"] or 0)
+    return round(total, 4)
+
+
+def _recipe_available_qty(rows):
+    if not rows:
+        return 0
+    available = None
+    for row in rows:
+        qty_per = float(row["qty_per_unit"])
+        if qty_per <= 0:
+            return 0
+        can_make = float(row["ingredient_quantity"] or 0) / qty_per
+        available = can_make if available is None else min(available, can_make)
+    if available is None:
+        return 0
+    return int(available // 1)  # floor toward zero for non-negative
+
+
+def _replace_product_recipe(db, business_id, product_id, lines):
+    """Replace recipe lines. lines: [{ingredient_id, qty_per_unit}, ...]"""
+    if not isinstance(lines, list):
+        return "Recipe must be a list of ingredients"
+    if not lines:
+        return "Add at least one ingredient to the recipe"
+
+    seen = set()
+    normalized = []
+    for raw in lines:
+        try:
+            ingredient_id = int(raw.get("ingredient_id"))
+            qty = float(raw.get("qty_per_unit"))
+        except (TypeError, ValueError, AttributeError):
+            return "Invalid recipe line"
+        if qty <= 0:
+            return "Recipe quantities must be greater than zero"
+        if ingredient_id in seen:
+            return "Duplicate ingredient in recipe"
+        seen.add(ingredient_id)
+        normalized.append((ingredient_id, qty))
+
+    placeholders = ",".join("?" * len(normalized))
+    ids = [item[0] for item in normalized]
+    found = db.execute(
+        f"""SELECT id FROM ingredients
+            WHERE business_id = ? AND id IN ({placeholders})""",
+        [business_id, *ids],
+    ).fetchall()
+    if len(found) != len(normalized):
+        return "One or more ingredients were not found"
+
+    db.execute(
+        "DELETE FROM product_recipes WHERE product_id = ? AND business_id = ?",
+        (product_id, business_id),
+    )
+    for ingredient_id, qty in normalized:
+        db.execute(
+            """INSERT INTO product_recipes
+               (business_id, product_id, ingredient_id, qty_per_unit)
+               VALUES (?, ?, ?, ?)""",
+            (business_id, product_id, ingredient_id, qty),
+        )
+    return None
+
+
+def _weighted_avg_cost(old_qty, old_cost, added_qty, purchase_unit_cost):
+    old_qty = float(old_qty or 0)
+    old_cost = float(old_cost or 0)
+    added_qty = float(added_qty or 0)
+    purchase_unit_cost = float(purchase_unit_cost or 0)
+    new_qty = old_qty + added_qty
+    if new_qty <= 0:
+        return round(purchase_unit_cost, 4)
+    return round(
+        (old_qty * old_cost + added_qty * purchase_unit_cost) / new_qty,
+        4,
+    )
+
+
+def _parse_expiry_date(data):
+    """Optional YYYY-MM-DD from request JSON; empty clears to None."""
+    if not isinstance(data, dict) or "expiry_date" not in data:
+        return None, None
+    raw = data.get("expiry_date")
+    if raw is None or str(raw).strip() == "":
+        return None, None
+    text = str(raw).strip()[:10]
+    try:
+        datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        return None, "Expiry date must be YYYY-MM-DD"
+    return text, None
+
+
+def _parse_optional_lot_id(data):
+    if not isinstance(data, dict) or data.get("lot_id") in (None, ""):
+        return None, None
+    try:
+        lot_id = int(data.get("lot_id"))
+        if lot_id <= 0:
+            return None, "Invalid lot id"
+        return lot_id, None
+    except (TypeError, ValueError):
+        return None, "Invalid lot id"
+
+
+def row_to_product(
+    row,
+    category_cup_map=None,
+    cup_inventory=None,
+    include_cost=None,
+    recipe_rows=None,
+    include_recipe=False,
+):
     uses_cups = (
         category_cup_map.get(row["category"], False)
         if category_cup_map is not None
         else False
     )
-    if uses_cups and cup_inventory is not None:
+    uses_recipe = _product_uses_recipe(row)
+
+    if uses_recipe and recipe_rows is not None:
+        effective_qty = _recipe_available_qty(recipe_rows)
+        reorder = 0
+    elif uses_cups and cup_inventory is not None:
         effective_qty = cup_inventory["quantity"]
         reorder = cup_inventory["reorder_level"]
     else:
@@ -1062,40 +1367,48 @@ def row_to_product(row, category_cup_map=None, cup_inventory=None, include_cost=
         "price": round(row["price"], 2),
         "quantity": effective_qty,
         "reorder_level": reorder,
-        "uses_cup_stock": uses_cups,
+        "uses_cup_stock": uses_cups and not uses_recipe,
+        "uses_recipe": uses_recipe,
         "description": row["description"] or "",
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
-        "stock_status": _stock_status(effective_qty, reorder),
+        "stock_status": _stock_status(effective_qty, reorder if not uses_recipe else 0),
     }
     if include_cost is None:
         include_cost = _can_view_cost()
     if include_cost:
-        cost_price = round(_product_cost_value(row), 2)
+        if uses_recipe and recipe_rows is not None:
+            cost_price = _recipe_unit_cost(recipe_rows)
+        else:
+            cost_price = round(_product_cost_value(row), 2)
         margin, margin_pct = _margin_from_prices(data["price"], cost_price)
-        data["cost_price"] = cost_price
+        data["cost_price"] = round(cost_price, 2)
         data["margin"] = margin
         data["margin_pct"] = margin_pct
+    if include_recipe and recipe_rows is not None:
+        data["recipe"] = _recipe_lines_payload(recipe_rows, include_cost=include_cost)
     return data
 
 
 def _products_response(db, rows, low_only=False):
     category_cup_map = get_category_cup_map(db)
     cup_inventory = get_cup_inventory(db)
-    products = [
-        row_to_product(row, category_cup_map, cup_inventory) for row in rows
-    ]
+    biz_id = current_business_id()
+    recipe_cache = {}
+    products = []
+    for row in rows:
+        recipe_rows = None
+        if _product_uses_recipe(row):
+            pid = row["id"]
+            if pid not in recipe_cache:
+                recipe_cache[pid] = _get_recipe_rows(db, pid, biz_id)
+            recipe_rows = recipe_cache[pid]
+        products.append(
+            row_to_product(row, category_cup_map, cup_inventory, recipe_rows=recipe_rows)
+        )
     if low_only:
         products = [p for p in products if p["stock_status"] in ("low", "out")]
     return products
-
-
-def _stock_status(quantity, reorder_level):
-    if quantity <= 0:
-        return "out"
-    if quantity <= reorder_level:
-        return "low"
-    return "ok"
 
 
 def _not_voided_clause(alias=""):
@@ -2169,7 +2482,18 @@ def get_product(product_id):
         return jsonify({"error": "Product not found"}), 404
     category_cup_map = get_category_cup_map(db)
     cup_inventory = get_cup_inventory(db)
-    return jsonify(row_to_product(row, category_cup_map, cup_inventory))
+    recipe_rows = (
+        _get_recipe_rows(db, product_id, biz_id) if _product_uses_recipe(row) else []
+    )
+    return jsonify(
+        row_to_product(
+            row,
+            category_cup_map,
+            cup_inventory,
+            recipe_rows=recipe_rows,
+            include_recipe=True,
+        )
+    )
 
 
 @app.route("/api/products", methods=["POST"])
@@ -2189,14 +2513,22 @@ def create_product():
     if not category:
         return jsonify({"error": "Category is required"}), 400
 
+    uses_recipe = bool(data.get("uses_recipe"))
     uses_cups = category_uses_cups(db, category)
-    quantity = 0 if uses_cups else int(data.get("quantity", 0))
-    cost_price = float(data.get("cost_price", 0) or 0)
+    if uses_recipe and uses_cups:
+        return jsonify({
+            "error": "Recipe products cannot use shared cup inventory. Pick another category."
+        }), 400
+
+    quantity = 0 if (uses_cups or uses_recipe) else int(data.get("quantity", 0))
+    cost_price = 0.0 if uses_recipe else float(data.get("cost_price", 0) or 0)
+    reorder_level = 0 if uses_recipe else int(data.get("reorder_level", 10))
 
     cur = db.execute(
         """INSERT INTO products
-           (business_id, name, category, price, cost_price, quantity, reorder_level, sku, description, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (business_id, name, category, price, cost_price, quantity, reorder_level,
+            sku, description, created_at, updated_at, uses_recipe)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             biz_id,
             data["name"].strip(),
@@ -2204,21 +2536,41 @@ def create_product():
             float(data["price"]),
             cost_price,
             quantity,
-            int(data.get("reorder_level", 10)),
+            reorder_level,
             None,
             (data.get("description") or "").strip() or None,
             ts,
             ts,
+            1 if uses_recipe else 0,
         ),
     )
-    if quantity > 0:
+    product_id = cur.lastrowid
+
+    if uses_recipe:
+        recipe_err = _replace_product_recipe(
+            db, biz_id, product_id, data.get("recipe") or []
+        )
+        if recipe_err:
+            db.rollback()
+            return jsonify({"error": recipe_err}), 400
+        recipe_rows = _get_recipe_rows(db, product_id, biz_id)
+        cost_price = _recipe_unit_cost(recipe_rows)
+        db.execute(
+            "UPDATE products SET cost_price = ? WHERE id = ? AND business_id = ?",
+            (cost_price, product_id, biz_id),
+        )
+    elif quantity > 0:
+        expiry_date, expiry_err = _parse_expiry_date(data)
+        if expiry_err:
+            db.rollback()
+            return jsonify({"error": expiry_err}), 400
         db.execute(
             """INSERT INTO transactions
                (business_id, product_id, type, quantity, unit_price, cost_price, total_amount, notes, created_at)
                VALUES (?, ?, 'restock', ?, ?, ?, ?, ?, ?)""",
             (
                 biz_id,
-                cur.lastrowid,
+                product_id,
                 quantity,
                 cost_price,
                 cost_price,
@@ -2227,25 +2579,49 @@ def create_product():
                 ts,
             ),
         )
+        fifo.create_lot(
+            db,
+            fifo.POOL_PRODUCT,
+            biz_id,
+            quantity,
+            cost_price,
+            ref_id=product_id,
+            received_at=ts,
+            expiry_date=expiry_date,
+            notes="Initial stock",
+            source="restock",
+            created_at=ts,
+            sync=True,
+        )
     log_activity(
         db,
         action="product.create",
         business_id=biz_id,
         entity_type="product",
-        entity_id=cur.lastrowid,
+        entity_id=product_id,
         details={
             "name": data["name"].strip(),
             "category": category,
             "price": float(data["price"]),
             "cost_price": cost_price,
             "quantity": quantity,
+            "uses_recipe": uses_recipe,
         },
     )
     db.commit()
-    row = db.execute("SELECT * FROM products WHERE id = ?", (cur.lastrowid,)).fetchone()
+    row = db.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
     category_cup_map = get_category_cup_map(db)
     cup_inventory = get_cup_inventory(db)
-    return jsonify(row_to_product(row, category_cup_map, cup_inventory)), 201
+    recipe_rows = _get_recipe_rows(db, product_id, biz_id) if uses_recipe else []
+    return jsonify(
+        row_to_product(
+            row,
+            category_cup_map,
+            cup_inventory,
+            recipe_rows=recipe_rows,
+            include_recipe=True,
+        )
+    ), 201
 
 
 @app.route("/api/products/<int:product_id>", methods=["PUT"])
@@ -2267,6 +2643,14 @@ def update_product(product_id):
     if error:
         return jsonify({"error": error}), 400
 
+    uses_recipe = bool(data.get("uses_recipe", _product_uses_recipe(row)))
+    category = data.get("category", row["category"])
+    uses_cups = category_uses_cups(db, category)
+    if uses_recipe and uses_cups:
+        return jsonify({
+            "error": "Recipe products cannot use shared cup inventory. Pick another category."
+        }), 400
+
     try:
         new_quantity = int(data.get("quantity", row["quantity"]))
         if new_quantity < 0:
@@ -2274,20 +2658,97 @@ def update_product(product_id):
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid quantity"}), 400
 
-    category = data.get("category", row["category"])
-    uses_cups = category_uses_cups(db, category)
-    if uses_cups:
+    if uses_cups or uses_recipe:
         new_quantity = 0
 
     ts = now_iso()
     old_quantity = row["quantity"]
-    if "cost_price" in data and data.get("cost_price") is not None:
-        cost_price = float(data.get("cost_price", 0) or 0)
-    else:
+    held_finished_stock = (
+        not _product_uses_recipe(row)
+        and not category_uses_cups(db, row["category"], biz_id)
+    )
+    if uses_recipe:
         cost_price = _product_cost_value(row)
+        reorder_level = 0
+    else:
+        if "cost_price" in data and data.get("cost_price") is not None:
+            cost_price = float(data.get("cost_price", 0) or 0)
+        else:
+            cost_price = _product_cost_value(row)
+        reorder_level = int(data.get("reorder_level", row["reorder_level"]))
+
+    if "recipe" in data:
+        if uses_recipe:
+            recipe_err = _replace_product_recipe(
+                db, biz_id, product_id, data.get("recipe") or []
+            )
+            if recipe_err:
+                db.rollback()
+                return jsonify({"error": recipe_err}), 400
+            cost_price = _recipe_unit_cost(_get_recipe_rows(db, product_id, biz_id))
+        else:
+            db.execute(
+                "DELETE FROM product_recipes WHERE product_id = ? AND business_id = ?",
+                (product_id, biz_id),
+            )
+    elif uses_recipe:
+        recipe_rows = _get_recipe_rows(db, product_id, biz_id)
+        if not recipe_rows:
+            return jsonify({"error": "Add at least one ingredient to the recipe"}), 400
+        cost_price = _recipe_unit_cost(recipe_rows)
+    elif _product_uses_recipe(row) and not uses_recipe:
+        db.execute(
+            "DELETE FROM product_recipes WHERE product_id = ? AND business_id = ?",
+            (product_id, biz_id),
+        )
+
+    # Sync lots when finished-goods qty changes, including switch to recipe/cups (qty→0)
+    should_sync_lots = (
+        held_finished_stock and new_quantity != old_quantity
+    ) or (
+        held_finished_stock and (uses_recipe or uses_cups) and old_quantity > 0
+    )
+    if should_sync_lots:
+        diff = new_quantity - old_quantity
+        try:
+            fifo.adjust_to_quantity(
+                db,
+                fifo.POOL_PRODUCT,
+                biz_id,
+                new_quantity,
+                ref_id=product_id,
+                unit_cost=cost_price,
+                notes=f"Updated from product edit ({old_quantity} → {new_quantity})",
+                created_at=ts,
+            )
+        except fifo.InsufficientLotStock as exc:
+            db.rollback()
+            return jsonify({"error": str(exc)}), 400
+        if diff != 0:
+            db.execute(
+                """INSERT INTO transactions
+                   (business_id, product_id, type, quantity, unit_price, total_amount, notes, created_at)
+                   VALUES (?, ?, 'adjustment', ?, ?, 0, ?, ?)""",
+                (
+                    biz_id,
+                    product_id,
+                    diff,
+                    float(data["price"]),
+                    f"Updated from product edit ({old_quantity} → {new_quantity})",
+                    ts,
+                ),
+            )
+        if not uses_recipe and not uses_cups:
+            synced = db.execute(
+                "SELECT cost_price, quantity FROM products WHERE id = ?", (product_id,)
+            ).fetchone()
+            cost_price = float(synced["cost_price"] or 0)
+            new_quantity = int(synced["quantity"])
+
     db.execute(
         """UPDATE products SET
-           name=?, category=?, price=?, cost_price=?, quantity=?, reorder_level=?, sku=?, description=?, updated_at=?
+           name=?, category=?, price=?, cost_price=?, quantity=?, reorder_level=?,
+           sku=?, description=?, updated_at=?, uses_recipe=?
            WHERE id=?""",
         (
             data["name"].strip(),
@@ -2295,29 +2756,14 @@ def update_product(product_id):
             float(data["price"]),
             cost_price,
             new_quantity,
-            int(data.get("reorder_level", row["reorder_level"])),
+            reorder_level,
             None,
             (data.get("description") or "").strip() or None,
             ts,
+            1 if uses_recipe else 0,
             product_id,
         ),
     )
-
-    if not uses_cups and new_quantity != old_quantity:
-        diff = new_quantity - old_quantity
-        db.execute(
-            """INSERT INTO transactions
-               (business_id, product_id, type, quantity, unit_price, total_amount, notes, created_at)
-               VALUES (?, ?, 'adjustment', ?, ?, 0, ?, ?)""",
-            (
-                biz_id,
-                product_id,
-                diff,
-                float(data["price"]),
-                f"Updated from product edit ({old_quantity} → {new_quantity})",
-                ts,
-            ),
-        )
 
     log_activity(
         db,
@@ -2331,13 +2777,23 @@ def update_product(product_id):
             "price": float(data["price"]),
             "cost_price": cost_price,
             "quantity": new_quantity,
+            "uses_recipe": uses_recipe,
         },
     )
     db.commit()
     updated = db.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
     category_cup_map = get_category_cup_map(db)
     cup_inventory = get_cup_inventory(db)
-    return jsonify(row_to_product(updated, category_cup_map, cup_inventory))
+    recipe_rows = _get_recipe_rows(db, product_id, biz_id) if uses_recipe else []
+    return jsonify(
+        row_to_product(
+            updated,
+            category_cup_map,
+            cup_inventory,
+            recipe_rows=recipe_rows,
+            include_recipe=True,
+        )
+    )
 
 
 @app.route("/api/products/<int:product_id>", methods=["DELETE"])
@@ -2367,6 +2823,96 @@ def delete_product(product_id):
     )
     db.commit()
     return jsonify({"message": "Product deleted"})
+
+
+@app.route("/api/products/<int:product_id>/recipe", methods=["GET"])
+@login_required
+def get_product_recipe(product_id):
+    db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    row = db.execute(
+        "SELECT * FROM products WHERE id = ? AND business_id = ?",
+        (product_id, biz_id),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Product not found"}), 404
+    recipe_rows = _get_recipe_rows(db, product_id, biz_id)
+    include_cost = _can_view_cost()
+    payload = {
+        "product_id": product_id,
+        "uses_recipe": _product_uses_recipe(row),
+        "recipe": _recipe_lines_payload(recipe_rows, include_cost=include_cost),
+        "available_quantity": _recipe_available_qty(recipe_rows),
+    }
+    if include_cost:
+        payload["cost_price"] = _recipe_unit_cost(recipe_rows)
+    return jsonify(payload)
+
+
+@app.route("/api/products/<int:product_id>/recipe", methods=["PUT"])
+@role_required("admin", "stock_manager")
+def put_product_recipe(product_id):
+    db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    row = db.execute(
+        "SELECT * FROM products WHERE id = ? AND business_id = ?",
+        (product_id, biz_id),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Product not found"}), 404
+    if category_uses_cups(db, row["category"]):
+        return jsonify({
+            "error": "Recipe products cannot use shared cup inventory. Change the category first."
+        }), 400
+
+    data = request.get_json(silent=True) or {}
+    lines = data.get("recipe") if "recipe" in data else data.get("lines")
+    recipe_err = _replace_product_recipe(db, biz_id, product_id, lines or [])
+    if recipe_err:
+        return jsonify({"error": recipe_err}), 400
+
+    ts = now_iso()
+    recipe_rows = _get_recipe_rows(db, product_id, biz_id)
+    cost_price = _recipe_unit_cost(recipe_rows)
+    db.execute(
+        """UPDATE products SET uses_recipe = 1, quantity = 0, reorder_level = 0,
+           cost_price = ?, updated_at = ?
+           WHERE id = ? AND business_id = ?""",
+        (cost_price, ts, product_id, biz_id),
+    )
+    log_activity(
+        db,
+        action="product.recipe_update",
+        business_id=biz_id,
+        entity_type="product",
+        entity_id=product_id,
+        details={
+            "name": row["name"],
+            "line_count": len(recipe_rows),
+            "cost_price": cost_price,
+        },
+        created_at=ts,
+    )
+    db.commit()
+    updated = db.execute(
+        "SELECT * FROM products WHERE id = ? AND business_id = ?",
+        (product_id, biz_id),
+    ).fetchone()
+    category_cup_map = get_category_cup_map(db)
+    cup_inventory = get_cup_inventory(db)
+    return jsonify(
+        row_to_product(
+            updated,
+            category_cup_map,
+            cup_inventory,
+            recipe_rows=recipe_rows,
+            include_recipe=True,
+        )
+    )
 
 
 def _validate_product(data, partial=False):
@@ -2472,6 +3018,9 @@ def _execute_checkout(
         products = {row["id"]: row for row in rows}
 
         cup_units_needed = 0
+        recipe_cache = {}
+        ingredient_needed = {}  # ingredient_id -> total qty needed
+
         for item in items:
             product_id = item["product_id"]
             quantity = item["quantity"]
@@ -2480,7 +3029,31 @@ def _execute_checkout(
                 db.rollback()
                 return None, "Product not found", 404
 
-            if category_cup_map.get(row["category"], False):
+            uses_recipe = _product_uses_recipe(row)
+            uses_cups = (
+                category_cup_map.get(row["category"], False) and not uses_recipe
+            )
+
+            if uses_recipe:
+                recipe_rows = _get_recipe_rows(db, product_id, biz_id)
+                recipe_cache[product_id] = recipe_rows
+                if not recipe_rows:
+                    db.rollback()
+                    return None, (
+                        f"{row['name']} has no recipe ingredients configured."
+                    ), 400
+                available = _recipe_available_qty(recipe_rows)
+                if available < quantity:
+                    db.rollback()
+                    return None, (
+                        f"Insufficient ingredients for {row['name']}. "
+                        f"Only {available} available."
+                    ), 400
+                for rline in recipe_rows:
+                    iid = rline["ingredient_id"]
+                    need = float(rline["qty_per_unit"]) * quantity
+                    ingredient_needed[iid] = ingredient_needed.get(iid, 0.0) + need
+            elif uses_cups:
                 cup_units_needed += quantity
             elif row["quantity"] < quantity:
                 db.rollback()
@@ -2495,6 +3068,28 @@ def _execute_checkout(
                 f"Insufficient cups in stock. Only {cup_inv['quantity']} cup(s) available."
             ), 400
 
+        # Re-check aggregated ingredient needs against live stock
+        if ingredient_needed:
+            ids = list(ingredient_needed.keys())
+            placeholders = ",".join("?" * len(ids))
+            ing_rows = db.execute(
+                f"""SELECT id, name, quantity FROM ingredients
+                    WHERE business_id = ? AND id IN ({placeholders})""",
+                [biz_id, *ids],
+            ).fetchall()
+            ing_map = {r["id"]: r for r in ing_rows}
+            for iid, need in ingredient_needed.items():
+                ing = ing_map.get(iid)
+                if ing is None:
+                    db.rollback()
+                    return None, "Ingredient not found for recipe product", 404
+                if float(ing["quantity"]) + 1e-9 < need:
+                    db.rollback()
+                    return None, (
+                        f"Insufficient stock for ingredient {ing['name']}. "
+                        f"Need {round(need, 4)}, have {round(float(ing['quantity']), 4)}."
+                    ), 400
+
         result_items = []
         total_amount = 0.0
         total_units = 0
@@ -2505,19 +3100,96 @@ def _execute_checkout(
             quantity = item["quantity"]
             row = products[product_id]
             unit_price = float(row["price"])
-            cost_price = _product_cost_value(row)
+            uses_recipe = _product_uses_recipe(row)
+            uses_cups = (
+                category_cup_map.get(row["category"], False) and not uses_recipe
+            )
+            recipe_rows = recipe_cache.get(product_id) if uses_recipe else None
             line_total = round(unit_price * quantity, 2)
-            uses_cups = category_cup_map.get(row["category"], False)
+            cost_price = _product_cost_value(row)
+            new_qty = row["quantity"]
 
-            if uses_cups:
+            if uses_recipe:
+                recipe_cost_total = 0.0
+                for rline in recipe_rows:
+                    iid = rline["ingredient_id"]
+                    deduct = float(rline["qty_per_unit"]) * quantity
+                    try:
+                        ing_allocs = fifo.consume_lots(
+                            db,
+                            fifo.POOL_INGREDIENT,
+                            biz_id,
+                            deduct,
+                            ref_id=iid,
+                            checkout_ref=checkout_ref,
+                            created_at=ts,
+                            sync=True,
+                        )
+                    except fifo.InsufficientLotStock as exc:
+                        db.rollback()
+                        return None, str(exc), 400
+                    unit_cost = fifo.weighted_unit_cost(ing_allocs)
+                    recipe_cost_total += unit_cost * deduct
+                    cur_ing = db.execute(
+                        """INSERT INTO ingredient_transactions
+                           (business_id, ingredient_id, type, quantity, unit_cost,
+                            total_cost, notes, checkout_ref, created_at)
+                           VALUES (?, ?, 'sale', ?, ?, ?, ?, ?, ?)""",
+                        (
+                            biz_id,
+                            iid,
+                            -deduct,
+                            unit_cost,
+                            round(unit_cost * deduct, 4),
+                            notes_text,
+                            checkout_ref,
+                            ts,
+                        ),
+                    )
+                    for alloc in ing_allocs:
+                        db.execute(
+                            """UPDATE lot_allocations
+                               SET ingredient_tx_id = ?
+                               WHERE business_id = ? AND checkout_ref = ?
+                                 AND pool = 'ingredient' AND lot_id = ?
+                                 AND quantity = ? AND ingredient_tx_id IS NULL""",
+                            (
+                                cur_ing.lastrowid,
+                                biz_id,
+                                checkout_ref,
+                                alloc["lot_id"],
+                                alloc["qty"],
+                            ),
+                        )
+                cost_price = (
+                    round(recipe_cost_total / quantity, 4) if quantity else 0.0
+                )
+                new_qty = _recipe_available_qty(
+                    _get_recipe_rows(db, product_id, biz_id)
+                )
+            elif uses_cups:
                 remaining_cups -= quantity
                 new_qty = row["quantity"]
             else:
-                new_qty = row["quantity"] - quantity
-                db.execute(
-                    "UPDATE products SET quantity=?, updated_at=? WHERE id=?",
-                    (new_qty, ts, product_id),
-                )
+                try:
+                    prod_allocs = fifo.consume_lots(
+                        db,
+                        fifo.POOL_PRODUCT,
+                        biz_id,
+                        quantity,
+                        ref_id=product_id,
+                        checkout_ref=checkout_ref,
+                        created_at=ts,
+                        sync=True,
+                    )
+                except fifo.InsufficientLotStock as exc:
+                    db.rollback()
+                    return None, str(exc), 400
+                cost_price = fifo.weighted_unit_cost(prod_allocs)
+                updated_qty = db.execute(
+                    "SELECT quantity FROM products WHERE id = ?", (product_id,)
+                ).fetchone()
+                new_qty = updated_qty["quantity"]
 
             cur = db.execute(
                 """INSERT INTO transactions
@@ -2542,33 +3214,78 @@ def _execute_checkout(
                     table_id,
                 ),
             )
+            tx_id = cur.lastrowid
+            if not uses_recipe and not uses_cups:
+                db.execute(
+                    """UPDATE lot_allocations
+                       SET transaction_id = ?
+                       WHERE business_id = ? AND checkout_ref = ?
+                         AND pool = 'product' AND ref_id = ?
+                         AND transaction_id IS NULL AND quantity > 0""",
+                    (tx_id, biz_id, checkout_ref, product_id),
+                )
 
             updated = db.execute(
                 "SELECT * FROM products WHERE id = ?", (product_id,)
             ).fetchone()
+            display_recipe = (
+                _get_recipe_rows(db, product_id, biz_id) if uses_recipe else None
+            )
             display_product = row_to_product(
-                updated, category_cup_map, {"quantity": remaining_cups, "reorder_level": cup_inv["reorder_level"]}
+                updated,
+                category_cup_map,
+                {
+                    "quantity": remaining_cups,
+                    "reorder_level": cup_inv["reorder_level"],
+                },
+                recipe_rows=display_recipe,
             )
             result_items.append({
-                "transaction_id": cur.lastrowid,
+                "transaction_id": tx_id,
                 "product": display_product,
                 "quantity_sold": quantity,
                 "unit_price": unit_price,
                 "total_amount": line_total,
-                "remaining_stock": remaining_cups if uses_cups else new_qty,
+                "remaining_stock": (
+                    remaining_cups if uses_cups else new_qty
+                ),
             })
             total_amount += line_total
             total_units += quantity
             products[product_id] = updated
 
         if cup_units_needed > 0:
-            biz_id = cup_inv["business_id"] if "business_id" in cup_inv.keys() else current_business_id()
-            _set_cup_quantity(db, biz_id, remaining_cups, ts)
-            db.execute(
+            biz_id = (
+                cup_inv["business_id"]
+                if "business_id" in cup_inv.keys()
+                else current_business_id()
+            )
+            try:
+                fifo.consume_lots(
+                    db,
+                    fifo.POOL_CUP,
+                    biz_id,
+                    cup_units_needed,
+                    checkout_ref=checkout_ref,
+                    created_at=ts,
+                    sync=True,
+                )
+            except fifo.InsufficientLotStock as exc:
+                db.rollback()
+                return None, str(exc), 400
+            remaining_cups = get_cup_inventory(db, biz_id)["quantity"]
+            cur_cup = db.execute(
                 """INSERT INTO cup_transactions
                    (business_id, type, quantity, notes, checkout_ref, created_at)
                    VALUES (?, 'sale', ?, ?, ?, ?)""",
                 (biz_id, -cup_units_needed, notes_text, checkout_ref, ts),
+            )
+            db.execute(
+                """UPDATE lot_allocations
+                   SET cup_tx_id = ?
+                   WHERE business_id = ? AND checkout_ref = ?
+                     AND pool = 'cup' AND cup_tx_id IS NULL AND quantity > 0""",
+                (cur_cup.lastrowid, biz_id, checkout_ref),
             )
 
         log_activity(
@@ -2889,7 +3606,7 @@ def _execute_void_sale(db, checkout_ref, voided_by_user_id, business_id=None):
         return None, "No business selected", 400
 
     rows = db.execute(
-        """SELECT t.*, p.category, p.name AS product_name
+        """SELECT t.*, p.category, p.name AS product_name, p.uses_recipe
            FROM transactions t
            JOIN products p ON p.id = t.product_id
            WHERE t.type = 'sale' AND t.checkout_ref = ? AND t.business_id = ?
@@ -2915,14 +3632,24 @@ def _execute_void_sale(db, checkout_ref, voided_by_user_id, business_id=None):
 
     db.execute("BEGIN IMMEDIATE")
     try:
+        lot_restored = fifo.restore_allocations(
+            db, business_id, checkout_ref, ts
+        )
+
         for row in rows:
             quantity = row["quantity"]
             product_id = row["product_id"]
-            uses_cups = category_cup_map.get(row["category"], False)
+            uses_recipe = _product_uses_recipe(row)
+            uses_cups = (
+                category_cup_map.get(row["category"], False) and not uses_recipe
+            )
 
+            if uses_recipe:
+                continue
             if uses_cups:
                 cup_units_restore += quantity
-            else:
+            elif not lot_restored:
+                # Legacy sales without lot allocations: restore aggregate only
                 product = db.execute(
                     """SELECT quantity FROM products
                        WHERE id = ? AND business_id = ?""",
@@ -2937,9 +3664,51 @@ def _execute_void_sale(db, checkout_ref, voided_by_user_id, business_id=None):
                     (new_qty, ts, product_id, business_id),
                 )
 
+        # Ingredient ledger restore (and aggregate if no lot allocations)
+        ing_sales = db.execute(
+            """SELECT ingredient_id, quantity, unit_cost
+               FROM ingredient_transactions
+               WHERE business_id = ? AND checkout_ref = ? AND type = 'sale'""",
+            (business_id, checkout_ref),
+        ).fetchall()
+        for ing_tx in ing_sales:
+            restore_qty = abs(float(ing_tx["quantity"]))
+            ingredient_id = ing_tx["ingredient_id"]
+            if not lot_restored:
+                ing = db.execute(
+                    """SELECT quantity FROM ingredients
+                       WHERE id = ? AND business_id = ?""",
+                    (ingredient_id, business_id),
+                ).fetchone()
+                if not ing:
+                    raise ValueError("Ingredient missing for void restore")
+                new_ing_qty = float(ing["quantity"]) + restore_qty
+                db.execute(
+                    """UPDATE ingredients SET quantity=?, updated_at=?
+                       WHERE id=? AND business_id=?""",
+                    (new_ing_qty, ts, ingredient_id, business_id),
+                )
+            db.execute(
+                """INSERT INTO ingredient_transactions
+                   (business_id, ingredient_id, type, quantity, unit_cost,
+                    total_cost, notes, checkout_ref, created_at)
+                   VALUES (?, ?, 'void_restore', ?, ?, ?, ?, ?, ?)""",
+                (
+                    business_id,
+                    ingredient_id,
+                    restore_qty,
+                    float(ing_tx["unit_cost"] or 0),
+                    round(float(ing_tx["unit_cost"] or 0) * restore_qty, 4),
+                    f"Void sale {checkout_ref}",
+                    checkout_ref,
+                    ts,
+                ),
+            )
+
         if cup_units_restore > 0:
-            new_cups = cup_inv["quantity"] + cup_units_restore
-            _set_cup_quantity(db, business_id, new_cups, ts)
+            if not lot_restored:
+                new_cups = cup_inv["quantity"] + cup_units_restore
+                _set_cup_quantity(db, business_id, new_cups, ts)
             db.execute(
                 """INSERT INTO cup_transactions
                    (business_id, type, quantity, notes, checkout_ref, created_at)
@@ -3751,6 +4520,10 @@ def restock_product():
         return jsonify({
             "error": "Cup-based products use shared cup inventory. Restock cups instead."
         }), 400
+    if _product_uses_recipe(row):
+        return jsonify({
+            "error": "Recipe products use ingredient stock. Restock ingredients instead."
+        }), 400
 
     ts = now_iso()
     try:
@@ -3759,12 +4532,32 @@ def restock_product():
             return jsonify({"error": "Purchase price must be zero or positive"}), 400
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid purchase price"}), 400
-    new_qty = row["quantity"] + quantity
 
-    db.execute(
-        "UPDATE products SET quantity=?, cost_price=?, updated_at=? WHERE id=? AND business_id=?",
-        (new_qty, unit_price, ts, product_id, biz_id),
+    expiry_date, expiry_err = _parse_expiry_date(data)
+    if expiry_err:
+        return jsonify({"error": expiry_err}), 400
+
+    notes = (data.get("notes") or "Stock replenishment").strip()
+    fifo.create_lot(
+        db,
+        fifo.POOL_PRODUCT,
+        biz_id,
+        quantity,
+        unit_price,
+        ref_id=product_id,
+        received_at=ts,
+        expiry_date=expiry_date,
+        notes=notes,
+        source="restock",
+        created_at=ts,
+        sync=True,
     )
+    updated = db.execute(
+        "SELECT * FROM products WHERE id = ? AND business_id = ?",
+        (product_id, biz_id),
+    ).fetchone()
+    new_qty = updated["quantity"]
+
     db.execute(
         """INSERT INTO transactions
            (business_id, product_id, type, quantity, unit_price, cost_price, total_amount, notes, created_at)
@@ -3776,7 +4569,7 @@ def restock_product():
             unit_price,
             unit_price,
             round(unit_price * quantity, 2),
-            (data.get("notes") or "Stock replenishment").strip(),
+            notes,
             ts,
         ),
     )
@@ -3791,15 +4584,12 @@ def restock_product():
             "quantity_added": quantity,
             "unit_cost": unit_price,
             "new_quantity": new_qty,
+            "expiry_date": expiry_date,
         },
         created_at=ts,
     )
     db.commit()
 
-    updated = db.execute(
-        "SELECT * FROM products WHERE id = ? AND business_id = ?",
-        (product_id, biz_id),
-    ).fetchone()
     category_cup_map = get_category_cup_map(db)
     cup_inventory = get_cup_inventory(db)
     return jsonify(row_to_product(updated, category_cup_map, cup_inventory))
@@ -3833,6 +4623,10 @@ def adjust_stock():
         return jsonify({
             "error": "Cup-based products use shared cup inventory. Adjust cups instead."
         }), 400
+    if _product_uses_recipe(row):
+        return jsonify({
+            "error": "Recipe products do not hold finished stock. Adjust ingredients instead."
+        }), 400
 
     diff = new_quantity - row["quantity"]
     if diff == 0:
@@ -3840,11 +4634,41 @@ def adjust_stock():
         cup_inventory = get_cup_inventory(db)
         return jsonify(row_to_product(row, category_cup_map, cup_inventory))
 
+    expiry_date, expiry_err = _parse_expiry_date(data)
+    if expiry_err:
+        return jsonify({"error": expiry_err}), 400
+    lot_id, lot_err = _parse_optional_lot_id(data)
+    if lot_err:
+        return jsonify({"error": lot_err}), 400
+
     ts = now_iso()
-    db.execute(
-        "UPDATE products SET quantity=?, updated_at=? WHERE id=? AND business_id=?",
-        (new_quantity, ts, product_id, biz_id),
+    notes = (
+        f"Adjusted from {row['quantity']} to {new_quantity}. "
+        + ((data.get("notes") or "").strip() or "Manual stock correction")
     )
+    try:
+        unit_cost = float(data.get("unit_cost", _product_cost_value(row)) or 0)
+        if unit_cost < 0:
+            return jsonify({"error": "Unit cost must be zero or positive"}), 400
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid unit cost"}), 400
+
+    try:
+        fifo.adjust_to_quantity(
+            db,
+            fifo.POOL_PRODUCT,
+            biz_id,
+            new_quantity,
+            ref_id=product_id,
+            lot_id=lot_id,
+            unit_cost=unit_cost,
+            expiry_date=expiry_date,
+            notes=notes,
+            created_at=ts,
+        )
+    except fifo.InsufficientLotStock as exc:
+        return jsonify({"error": str(exc)}), 400
+
     db.execute(
         """INSERT INTO transactions
            (business_id, product_id, type, quantity, unit_price, total_amount, notes, created_at)
@@ -3854,8 +4678,7 @@ def adjust_stock():
             product_id,
             diff,
             float(row["price"]),
-            f"Adjusted from {row['quantity']} to {new_quantity}. "
-            + ((data.get("notes") or "").strip() or "Manual stock correction"),
+            notes,
             ts,
         ),
     )
@@ -3870,6 +4693,7 @@ def adjust_stock():
             "from_quantity": row["quantity"],
             "to_quantity": new_quantity,
             "diff": diff,
+            "lot_id": lot_id,
         },
         created_at=ts,
     )
@@ -3882,6 +4706,508 @@ def adjust_stock():
     category_cup_map = get_category_cup_map(db)
     cup_inventory = get_cup_inventory(db)
     return jsonify(row_to_product(updated, category_cup_map, cup_inventory))
+
+
+# ── Ingredients API ──────────────────────────────────────────────────────────
+
+def _validate_ingredient(data, partial=False):
+    name = (data.get("name") or "").strip()
+    if not partial or "name" in data:
+        if not name:
+            return "Ingredient name is required"
+    if "unit" in data or not partial:
+        unit = (data.get("unit") or "").strip().lower()
+        if unit not in INGREDIENT_UNITS:
+            return "Unit must be g, ml, or pcs"
+    if "quantity" in data:
+        try:
+            if float(data["quantity"]) < 0:
+                return "Quantity cannot be negative"
+        except (TypeError, ValueError):
+            return "Invalid quantity"
+    if "reorder_level" in data:
+        try:
+            if float(data["reorder_level"]) < 0:
+                return "Reorder level cannot be negative"
+        except (TypeError, ValueError):
+            return "Invalid reorder level"
+    if "cost_per_unit" in data and data.get("cost_per_unit") is not None:
+        try:
+            if float(data["cost_per_unit"]) < 0:
+                return "Cost per unit must be zero or positive"
+        except (TypeError, ValueError):
+            return "Invalid cost per unit"
+    return None
+
+
+@app.route("/api/ingredients", methods=["GET"])
+@login_required
+def list_ingredients():
+    db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    search = request.args.get("search", "").strip()
+    low_only = request.args.get("low_stock") == "1"
+    query = "SELECT * FROM ingredients WHERE business_id = ?"
+    params = [biz_id]
+    if search:
+        query += " AND name LIKE ?"
+        params.append(f"%{search}%")
+    query += " ORDER BY name COLLATE NOCASE ASC"
+    rows = db.execute(query, params).fetchall()
+    items = [row_to_ingredient(row) for row in rows]
+    if low_only:
+        items = [i for i in items if i["stock_status"] in ("low", "out")]
+    return jsonify(items)
+
+
+@app.route("/api/ingredients/<int:ingredient_id>", methods=["GET"])
+@login_required
+def get_ingredient(ingredient_id):
+    db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    row = db.execute(
+        "SELECT * FROM ingredients WHERE id = ? AND business_id = ?",
+        (ingredient_id, biz_id),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Ingredient not found"}), 404
+    return jsonify(row_to_ingredient(row))
+
+
+@app.route("/api/ingredients", methods=["POST"])
+@role_required("admin", "stock_manager")
+def create_ingredient():
+    data = request.get_json(silent=True) or {}
+    error = _validate_ingredient(data)
+    if error:
+        return jsonify({"error": error}), 400
+
+    db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+
+    name = data["name"].strip()
+    unit = data["unit"].strip().lower()
+    try:
+        quantity = float(data.get("quantity", 0) or 0)
+        reorder_level = float(data.get("reorder_level", 0) or 0)
+        cost_per_unit = float(data.get("cost_per_unit", 0) or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid quantity or cost"}), 400
+    if quantity < 0 or reorder_level < 0 or cost_per_unit < 0:
+        return jsonify({"error": "Values cannot be negative"}), 400
+
+    existing = db.execute(
+        """SELECT id FROM ingredients
+           WHERE business_id = ? AND name = ? COLLATE NOCASE""",
+        (biz_id, name),
+    ).fetchone()
+    if existing:
+        return jsonify({"error": "An ingredient with this name already exists"}), 409
+
+    ts = now_iso()
+    cur = db.execute(
+        """INSERT INTO ingredients
+           (business_id, name, unit, quantity, reorder_level, cost_per_unit, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (biz_id, name, unit, quantity, reorder_level, cost_per_unit, ts, ts),
+    )
+    ingredient_id = cur.lastrowid
+    if quantity > 0:
+        expiry_date, expiry_err = _parse_expiry_date(data)
+        if expiry_err:
+            db.rollback()
+            return jsonify({"error": expiry_err}), 400
+        db.execute(
+            """INSERT INTO ingredient_transactions
+               (business_id, ingredient_id, type, quantity, unit_cost, total_cost, notes, created_at)
+               VALUES (?, ?, 'restock', ?, ?, ?, ?, ?)""",
+            (
+                biz_id,
+                ingredient_id,
+                quantity,
+                cost_per_unit,
+                round(cost_per_unit * quantity, 2),
+                "Initial stock",
+                ts,
+            ),
+        )
+        fifo.create_lot(
+            db,
+            fifo.POOL_INGREDIENT,
+            biz_id,
+            quantity,
+            cost_per_unit,
+            ref_id=ingredient_id,
+            received_at=ts,
+            expiry_date=expiry_date,
+            notes="Initial stock",
+            source="restock",
+            created_at=ts,
+            sync=True,
+        )
+    log_activity(
+        db,
+        action="ingredient.create",
+        business_id=biz_id,
+        entity_type="ingredient",
+        entity_id=ingredient_id,
+        details={
+            "name": name,
+            "unit": unit,
+            "quantity": quantity,
+            "cost_per_unit": cost_per_unit,
+        },
+        created_at=ts,
+    )
+    db.commit()
+    row = db.execute(
+        "SELECT * FROM ingredients WHERE id = ?", (ingredient_id,)
+    ).fetchone()
+    return jsonify(row_to_ingredient(row)), 201
+
+
+@app.route("/api/ingredients/<int:ingredient_id>", methods=["PUT", "PATCH"])
+@role_required("admin", "stock_manager")
+def update_ingredient(ingredient_id):
+    db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    row = db.execute(
+        "SELECT * FROM ingredients WHERE id = ? AND business_id = ?",
+        (ingredient_id, biz_id),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Ingredient not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    error = _validate_ingredient(data, partial=True)
+    if error:
+        return jsonify({"error": error}), 400
+
+    name = (data.get("name") if "name" in data else row["name"]).strip()
+    unit = (data.get("unit") if "unit" in data else row["unit"]).strip().lower()
+    if unit not in INGREDIENT_UNITS:
+        return jsonify({"error": "Unit must be g, ml, or pcs"}), 400
+
+    try:
+        reorder_level = float(
+            data["reorder_level"] if "reorder_level" in data else row["reorder_level"]
+        )
+        cost_per_unit = float(
+            data["cost_per_unit"] if "cost_per_unit" in data else row["cost_per_unit"]
+        )
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid reorder level or cost"}), 400
+    if reorder_level < 0 or cost_per_unit < 0:
+        return jsonify({"error": "Values cannot be negative"}), 400
+
+    dup = db.execute(
+        """SELECT id FROM ingredients
+           WHERE business_id = ? AND name = ? COLLATE NOCASE AND id != ?""",
+        (biz_id, name, ingredient_id),
+    ).fetchone()
+    if dup:
+        return jsonify({"error": "An ingredient with this name already exists"}), 409
+
+    # Quantity changes go through restock/adjust — keep stock unless explicitly sent
+    # on create-style edit without separate adjust (allow set only via adjust endpoint).
+    quantity = float(row["quantity"])
+    ts = now_iso()
+    db.execute(
+        """UPDATE ingredients SET name=?, unit=?, reorder_level=?, cost_per_unit=?, updated_at=?
+           WHERE id=? AND business_id=?""",
+        (name, unit, reorder_level, cost_per_unit, ts, ingredient_id, biz_id),
+    )
+    # Sync cached product cost_price for recipe products using this ingredient
+    _sync_recipe_product_costs_for_ingredient(db, biz_id, ingredient_id, ts)
+
+    log_activity(
+        db,
+        action="ingredient.update",
+        business_id=biz_id,
+        entity_type="ingredient",
+        entity_id=ingredient_id,
+        details={
+            "name": name,
+            "unit": unit,
+            "quantity": quantity,
+            "cost_per_unit": cost_per_unit,
+        },
+        created_at=ts,
+    )
+    db.commit()
+    updated = db.execute(
+        "SELECT * FROM ingredients WHERE id = ? AND business_id = ?",
+        (ingredient_id, biz_id),
+    ).fetchone()
+    return jsonify(row_to_ingredient(updated))
+
+
+@app.route("/api/ingredients/<int:ingredient_id>", methods=["DELETE"])
+@role_required("admin", "stock_manager")
+def delete_ingredient(ingredient_id):
+    db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    row = db.execute(
+        "SELECT id, name FROM ingredients WHERE id = ? AND business_id = ?",
+        (ingredient_id, biz_id),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Ingredient not found"}), 404
+
+    in_use = db.execute(
+        """SELECT COUNT(*) AS c FROM product_recipes
+           WHERE ingredient_id = ? AND business_id = ?""",
+        (ingredient_id, biz_id),
+    ).fetchone()["c"]
+    if in_use:
+        return jsonify({
+            "error": "Ingredient is used in one or more product recipes. Remove it from recipes first."
+        }), 409
+
+    db.execute(
+        "DELETE FROM ingredients WHERE id = ? AND business_id = ?",
+        (ingredient_id, biz_id),
+    )
+    log_activity(
+        db,
+        action="ingredient.delete",
+        business_id=biz_id,
+        entity_type="ingredient",
+        entity_id=ingredient_id,
+        details={"name": row["name"]},
+    )
+    db.commit()
+    return jsonify({"message": "Ingredient deleted"})
+
+
+def _sync_recipe_product_costs_for_ingredient(db, business_id, ingredient_id, ts=None):
+    ts = ts or now_iso()
+    product_ids = [
+        r["product_id"]
+        for r in db.execute(
+            """SELECT DISTINCT product_id FROM product_recipes
+               WHERE business_id = ? AND ingredient_id = ?""",
+            (business_id, ingredient_id),
+        ).fetchall()
+    ]
+    for product_id in product_ids:
+        recipe_rows = _get_recipe_rows(db, product_id, business_id)
+        cost_price = _recipe_unit_cost(recipe_rows)
+        db.execute(
+            """UPDATE products SET cost_price = ?, updated_at = ?
+               WHERE id = ? AND business_id = ? AND uses_recipe = 1""",
+            (cost_price, ts, product_id, business_id),
+        )
+
+
+@app.route("/api/ingredients/restock", methods=["POST"])
+@role_required("admin", "supervisor", "stock_manager")
+def restock_ingredient():
+    data = request.get_json(silent=True) or {}
+    try:
+        ingredient_id = int(data.get("ingredient_id"))
+        quantity = float(data.get("quantity", 0))
+        if quantity <= 0:
+            return jsonify({"error": "Quantity must be greater than zero"}), 400
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid ingredient or quantity"}), 400
+
+    db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    row = db.execute(
+        "SELECT * FROM ingredients WHERE id = ? AND business_id = ?",
+        (ingredient_id, biz_id),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Ingredient not found"}), 404
+
+    try:
+        purchase_unit_cost = float(
+            data.get("unit_cost", data.get("cost_per_unit", row["cost_per_unit"]))
+        )
+        if purchase_unit_cost < 0:
+            return jsonify({"error": "Purchase cost must be zero or positive"}), 400
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid purchase cost"}), 400
+
+    expiry_date, expiry_err = _parse_expiry_date(data)
+    if expiry_err:
+        return jsonify({"error": expiry_err}), 400
+
+    ts = now_iso()
+    notes = (data.get("notes") or "Ingredient replenishment").strip()
+    fifo.create_lot(
+        db,
+        fifo.POOL_INGREDIENT,
+        biz_id,
+        quantity,
+        purchase_unit_cost,
+        ref_id=ingredient_id,
+        received_at=ts,
+        expiry_date=expiry_date,
+        notes=notes,
+        source="restock",
+        created_at=ts,
+        sync=True,
+    )
+    updated = db.execute(
+        "SELECT * FROM ingredients WHERE id = ? AND business_id = ?",
+        (ingredient_id, biz_id),
+    ).fetchone()
+    new_qty = float(updated["quantity"])
+    new_cost = float(updated["cost_per_unit"] or 0)
+
+    db.execute(
+        """INSERT INTO ingredient_transactions
+           (business_id, ingredient_id, type, quantity, unit_cost, total_cost, notes, created_at)
+           VALUES (?, ?, 'restock', ?, ?, ?, ?, ?)""",
+        (
+            biz_id,
+            ingredient_id,
+            quantity,
+            purchase_unit_cost,
+            round(purchase_unit_cost * quantity, 2),
+            notes,
+            ts,
+        ),
+    )
+    _sync_recipe_product_costs_for_ingredient(db, biz_id, ingredient_id, ts)
+    log_activity(
+        db,
+        action="ingredient.restock",
+        business_id=biz_id,
+        entity_type="ingredient",
+        entity_id=ingredient_id,
+        details={
+            "name": row["name"],
+            "unit": row["unit"],
+            "quantity_added": quantity,
+            "unit_cost": purchase_unit_cost,
+            "new_quantity": new_qty,
+            "cost_per_unit": new_cost,
+            "expiry_date": expiry_date,
+        },
+        created_at=ts,
+    )
+    db.commit()
+    updated = db.execute(
+        "SELECT * FROM ingredients WHERE id = ? AND business_id = ?",
+        (ingredient_id, biz_id),
+    ).fetchone()
+    return jsonify(row_to_ingredient(updated))
+
+
+@app.route("/api/ingredients/adjust", methods=["POST"])
+@role_required("admin", "stock_manager")
+def adjust_ingredient():
+    data = request.get_json(silent=True) or {}
+    try:
+        ingredient_id = int(data.get("ingredient_id"))
+        new_quantity = float(data.get("new_quantity", -1))
+        if new_quantity < 0:
+            return jsonify({"error": "Quantity cannot be negative"}), 400
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid ingredient or quantity"}), 400
+
+    db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    row = db.execute(
+        "SELECT * FROM ingredients WHERE id = ? AND business_id = ?",
+        (ingredient_id, biz_id),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Ingredient not found"}), 404
+
+    old_qty = float(row["quantity"])
+    diff = new_quantity - old_qty
+    if abs(diff) < 1e-9:
+        return jsonify(row_to_ingredient(row))
+
+    expiry_date, expiry_err = _parse_expiry_date(data)
+    if expiry_err:
+        return jsonify({"error": expiry_err}), 400
+    lot_id, lot_err = _parse_optional_lot_id(data)
+    if lot_err:
+        return jsonify({"error": lot_err}), 400
+
+    ts = now_iso()
+    notes = (
+        f"Adjusted from {old_qty} to {new_quantity}. "
+        + ((data.get("notes") or "").strip() or "Manual stock correction")
+    )
+    try:
+        unit_cost = float(data.get("unit_cost", row["cost_per_unit"]) or 0)
+        if unit_cost < 0:
+            return jsonify({"error": "Unit cost must be zero or positive"}), 400
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid unit cost"}), 400
+
+    try:
+        fifo.adjust_to_quantity(
+            db,
+            fifo.POOL_INGREDIENT,
+            biz_id,
+            new_quantity,
+            ref_id=ingredient_id,
+            lot_id=lot_id,
+            unit_cost=unit_cost,
+            expiry_date=expiry_date,
+            notes=notes,
+            created_at=ts,
+        )
+    except fifo.InsufficientLotStock as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    db.execute(
+        """INSERT INTO ingredient_transactions
+           (business_id, ingredient_id, type, quantity, unit_cost, total_cost, notes, created_at)
+           VALUES (?, ?, 'adjustment', ?, ?, 0, ?, ?)""",
+        (
+            biz_id,
+            ingredient_id,
+            diff,
+            unit_cost,
+            notes,
+            ts,
+        ),
+    )
+    _sync_recipe_product_costs_for_ingredient(db, biz_id, ingredient_id, ts)
+    log_activity(
+        db,
+        action="ingredient.adjust",
+        business_id=biz_id,
+        entity_type="ingredient",
+        entity_id=ingredient_id,
+        details={
+            "name": row["name"],
+            "unit": row["unit"],
+            "from_quantity": old_qty,
+            "to_quantity": new_quantity,
+            "diff": diff,
+            "lot_id": lot_id,
+        },
+        created_at=ts,
+    )
+    db.commit()
+    updated = db.execute(
+        "SELECT * FROM ingredients WHERE id = ? AND business_id = ?",
+        (ingredient_id, biz_id),
+    ).fetchone()
+    return jsonify(row_to_ingredient(updated))
 
 
 # ── Cup inventory API ────────────────────────────────────────────────────────
@@ -3907,15 +5233,39 @@ def restock_cups():
     biz_id = current_business_id()
     if biz_id is None:
         return jsonify({"error": "No business selected"}), 400
-    cup_inv = get_cup_inventory(db, biz_id)
-    ts = now_iso()
-    new_qty = cup_inv["quantity"] + quantity
+    get_cup_inventory(db, biz_id)
+    expiry_date, expiry_err = _parse_expiry_date(data)
+    if expiry_err:
+        return jsonify({"error": expiry_err}), 400
 
-    _set_cup_quantity(db, biz_id, new_qty, ts)
+    try:
+        unit_cost = float(data.get("unit_cost", 0) or 0)
+        if unit_cost < 0:
+            return jsonify({"error": "Unit cost must be zero or positive"}), 400
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid unit cost"}), 400
+
+    ts = now_iso()
+    notes = (data.get("notes") or "Cup replenishment").strip()
+    fifo.create_lot(
+        db,
+        fifo.POOL_CUP,
+        biz_id,
+        quantity,
+        unit_cost,
+        received_at=ts,
+        expiry_date=expiry_date,
+        notes=notes,
+        source="restock",
+        created_at=ts,
+        sync=True,
+    )
+    cup_inv = get_cup_inventory(db, biz_id)
+    new_qty = cup_inv["quantity"]
     db.execute(
         """INSERT INTO cup_transactions (business_id, type, quantity, notes, created_at)
            VALUES (?, 'restock', ?, ?, ?)""",
-        (biz_id, quantity, (data.get("notes") or "Cup replenishment").strip(), ts),
+        (biz_id, quantity, notes, ts),
     )
     log_activity(
         db,
@@ -3923,7 +5273,11 @@ def restock_cups():
         business_id=biz_id,
         entity_type="cups",
         entity_id=biz_id,
-        details={"quantity_added": quantity, "new_quantity": new_qty},
+        details={
+            "quantity_added": quantity,
+            "new_quantity": new_qty,
+            "expiry_date": expiry_date,
+        },
         created_at=ts,
     )
     db.commit()
@@ -3950,12 +5304,41 @@ def adjust_cups():
     if diff == 0:
         return jsonify(row_to_cup_inventory(cup_inv))
 
+    expiry_date, expiry_err = _parse_expiry_date(data)
+    if expiry_err:
+        return jsonify({"error": expiry_err}), 400
+    lot_id, lot_err = _parse_optional_lot_id(data)
+    if lot_err:
+        return jsonify({"error": lot_err}), 400
+
+    try:
+        unit_cost = float(data.get("unit_cost", 0) or 0)
+        if unit_cost < 0:
+            return jsonify({"error": "Unit cost must be zero or positive"}), 400
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid unit cost"}), 400
+
     ts = now_iso()
-    _set_cup_quantity(db, biz_id, new_quantity, ts)
+    notes = (data.get("notes") or "Cup stock correction").strip()
+    try:
+        fifo.adjust_to_quantity(
+            db,
+            fifo.POOL_CUP,
+            biz_id,
+            new_quantity,
+            lot_id=lot_id,
+            unit_cost=unit_cost,
+            expiry_date=expiry_date,
+            notes=notes,
+            created_at=ts,
+        )
+    except fifo.InsufficientLotStock as exc:
+        return jsonify({"error": str(exc)}), 400
+
     db.execute(
         """INSERT INTO cup_transactions (business_id, type, quantity, notes, created_at)
            VALUES (?, 'adjustment', ?, ?, ?)""",
-        (biz_id, diff, (data.get("notes") or "Cup stock correction").strip(), ts),
+        (biz_id, diff, notes, ts),
     )
     log_activity(
         db,
@@ -3967,11 +5350,70 @@ def adjust_cups():
             "from_quantity": cup_inv["quantity"],
             "to_quantity": new_quantity,
             "diff": diff,
+            "lot_id": lot_id,
         },
         created_at=ts,
     )
     db.commit()
     return jsonify(row_to_cup_inventory(get_cup_inventory(db, biz_id)))
+
+
+# ── FIFO lots API ────────────────────────────────────────────────────────────
+
+@app.route("/api/lots", methods=["GET"])
+@role_required("admin", "supervisor", "stock_manager")
+def api_list_lots():
+    db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+
+    pool = (request.args.get("pool") or "").strip().lower() or None
+    if pool and pool not in fifo.VALID_POOLS:
+        return jsonify({"error": "pool must be product, ingredient, or cup"}), 400
+
+    ref_id = None
+    if request.args.get("ref_id") not in (None, ""):
+        try:
+            ref_id = int(request.args.get("ref_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid ref_id"}), 400
+
+    include_depleted = request.args.get("include_depleted") == "1"
+    try:
+        limit = min(int(request.args.get("limit", 200)), 500)
+    except (TypeError, ValueError):
+        limit = 200
+
+    lots = fifo.list_lots(
+        db,
+        biz_id,
+        pool=pool,
+        ref_id=ref_id,
+        include_depleted=include_depleted,
+        limit=limit,
+    )
+    return jsonify(lots)
+
+
+@app.route("/api/lots/expiring", methods=["GET"])
+@role_required("admin", "supervisor", "stock_manager")
+def api_expiring_lots():
+    db = get_db()
+    biz_id, err = _biz_or_error()
+    if err:
+        return err
+    try:
+        within_days = int(request.args.get("within_days", 7))
+        within_days = max(0, min(within_days, 365))
+    except (TypeError, ValueError):
+        within_days = 7
+
+    today = now_kigali().date()
+    lots = fifo.get_expiring_lots(
+        db, biz_id, within_days=within_days, now_date=today
+    )
+    return jsonify(lots)
 
 
 # ── Transactions & Dashboard API ─────────────────────────────────────────────
@@ -4357,25 +5799,51 @@ def dashboard_stats():
     ).fetchall()
     total_products = len(products)
     total_stock = sum(
-        p["quantity"] for p in products if not category_cup_map.get(p["category"], False)
-    )
-    total_stock += cup_inventory["quantity"]
-    inventory_value = sum(
-        p["price"] * p["quantity"]
+        p["quantity"]
         for p in products
         if not category_cup_map.get(p["category"], False)
+        and not _product_uses_recipe(p)
     )
+    total_stock += cup_inventory["quantity"]
 
-    enriched = [
-        row_to_product(p, category_cup_map, cup_inventory) for p in products
-    ]
+    # Inventory value at remaining-lot cost (FIFO) when cost roles can view
+    ingredient_rows = db.execute(
+        "SELECT * FROM ingredients WHERE business_id = ?", (biz_id,)
+    ).fetchall()
+    inventory_value = fifo.inventory_lot_value(db, biz_id)
+
+    enriched = []
+    for p in products:
+        recipe_rows = None
+        if _product_uses_recipe(p):
+            recipe_rows = _get_recipe_rows(db, p["id"], biz_id)
+        enriched.append(
+            row_to_product(
+                p, category_cup_map, cup_inventory, recipe_rows=recipe_rows
+            )
+        )
     low_stock = [
         p for p in enriched
         if not p["uses_cup_stock"] and p["stock_status"] in ("low", "out")
     ]
+    # Recipe products with 0 makeable servings count as out; skip "low" reorder
+    # since they have no finished reorder level.
     out_of_stock = sum(
         1 for p in enriched if not p["uses_cup_stock"] and p["stock_status"] == "out"
     )
+
+    low_ingredients = [
+        {
+            **row_to_ingredient(i, include_cost=False),
+            "category": f"Ingredient · {i['unit']}",
+            "is_ingredient": True,
+        }
+        for i in ingredient_rows
+        if _stock_status(float(i["quantity"] or 0), float(i["reorder_level"] or 0))
+        in ("low", "out")
+    ]
+    out_ingredients = sum(1 for i in low_ingredients if i["stock_status"] == "out")
+
     cup_stock = row_to_cup_inventory(cup_inventory)
 
     today = today_kigali()
@@ -4535,13 +6003,27 @@ def dashboard_stats():
         (biz_id,),
     ).fetchone()
 
+    expiring_lots = fifo.get_expiring_lots(
+        db, biz_id, within_days=7, now_date=today_date_obj
+    )
+
     return jsonify({
         "total_products": total_products,
         "total_stock_units": total_stock,
         "inventory_value": round(inventory_value, 2),
-        "low_stock_count": len(low_stock) + (1 if cup_stock["stock_status"] in ("low", "out") else 0),
-        "out_of_stock_count": out_of_stock + (1 if cup_stock["stock_status"] == "out" else 0),
-        "low_stock_items": low_stock[:8],
+        "low_stock_count": (
+            len(low_stock)
+            + len(low_ingredients)
+            + (1 if cup_stock["stock_status"] in ("low", "out") else 0)
+        ),
+        "out_of_stock_count": (
+            out_of_stock
+            + out_ingredients
+            + (1 if cup_stock["stock_status"] == "out" else 0)
+        ),
+        "low_stock_items": (low_ingredients + low_stock)[:8],
+        "expiring_lots": expiring_lots[:8],
+        "expiring_lots_count": len(expiring_lots),
         "cup_inventory": cup_stock,
         "revenue_today": round(sales_today["revenue"], 2),
         "units_sold_today": sales_today["units"],
@@ -4935,12 +6417,27 @@ def platform_update_business(business_id):
     from business import unique_business_slug
 
     slug = unique_business_slug(db, name, exclude_id=business_id) if name != row["name"] else row["slug"]
+
+    primary_color = row["primary_color"] if "primary_color" in row.keys() else DEFAULT_PRIMARY_COLOR
+    accent_color = row["accent_color"] if "accent_color" in row.keys() else DEFAULT_ACCENT_COLOR
+    if "primary_color" in data:
+        try:
+            primary_color = normalize_hex_color(data.get("primary_color"), DEFAULT_PRIMARY_COLOR)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+    if "accent_color" in data:
+        try:
+            accent_color = normalize_hex_color(data.get("accent_color"), DEFAULT_ACCENT_COLOR)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
     ts = now_iso()
     db.execute(
         """UPDATE businesses
-           SET name = ?, slug = ?, is_active = ?, updated_at = ?
+           SET name = ?, slug = ?, is_active = ?,
+               primary_color = ?, accent_color = ?, updated_at = ?
            WHERE id = ?""",
-        (name, slug, is_active, ts, business_id),
+        (name, slug, is_active, primary_color, accent_color, ts, business_id),
     )
     log_activity(
         db,
@@ -4948,11 +6445,170 @@ def platform_update_business(business_id):
         business_id=business_id,
         entity_type="business",
         entity_id=business_id,
-        details={"name": name, "is_active": bool(is_active)},
+        details={
+            "name": name,
+            "is_active": bool(is_active),
+            "primary_color": primary_color,
+            "accent_color": accent_color,
+        },
         created_at=ts,
     )
     db.commit()
     return jsonify(row_to_business(get_business_by_id(db, business_id)))
+
+
+@app.route("/api/business/branding", methods=["GET"])
+@login_required
+def get_business_branding():
+    db = get_db()
+    biz_id = current_business_id()
+    if not biz_id:
+        return jsonify({"error": "No business selected"}), 400
+    row = get_business_by_id(db, biz_id)
+    if not row:
+        return jsonify({"error": "Business not found"}), 404
+    return jsonify(row_to_business(row))
+
+
+@app.route("/api/business/branding", methods=["PUT"])
+@admin_required
+def update_business_branding():
+    db = get_db()
+    biz_id = current_business_id()
+    if not biz_id:
+        return jsonify({"error": "No business selected"}), 400
+    row = get_business_by_id(db, biz_id)
+    if not row:
+        return jsonify({"error": "Business not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    primary_color = row["primary_color"] if "primary_color" in row.keys() else DEFAULT_PRIMARY_COLOR
+    accent_color = row["accent_color"] if "accent_color" in row.keys() else DEFAULT_ACCENT_COLOR
+
+    if "primary_color" in data:
+        try:
+            primary_color = normalize_hex_color(data.get("primary_color"), DEFAULT_PRIMARY_COLOR)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+    if "accent_color" in data:
+        try:
+            accent_color = normalize_hex_color(data.get("accent_color"), DEFAULT_ACCENT_COLOR)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    ts = now_iso()
+    db.execute(
+        """UPDATE businesses
+           SET primary_color = ?, accent_color = ?, updated_at = ?
+           WHERE id = ?""",
+        (primary_color, accent_color, ts, biz_id),
+    )
+    log_activity(
+        db,
+        action="business.branding_update",
+        business_id=biz_id,
+        entity_type="business",
+        entity_id=biz_id,
+        details={"primary_color": primary_color, "accent_color": accent_color},
+        created_at=ts,
+    )
+    db.commit()
+    return jsonify(row_to_business(get_business_by_id(db, biz_id)))
+
+
+@app.route("/api/business/branding/logo", methods=["POST"])
+@admin_required
+def upload_business_logo():
+    db = get_db()
+    biz_id = current_business_id()
+    if not biz_id:
+        return jsonify({"error": "No business selected"}), 400
+    row = get_business_by_id(db, biz_id)
+    if not row:
+        return jsonify({"error": "Business not found"}), 404
+
+    file = request.files.get("logo")
+    if file is None or not (file.filename or "").strip():
+        return jsonify({"error": "Choose a logo image to upload"}), 400
+
+    filename = secure_filename(file.filename)
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in LOGO_ALLOWED_EXTENSIONS:
+        return jsonify({
+            "error": "Logo must be a PNG, JPG, or WebP image",
+        }), 400
+
+    upload_dir = business_uploads_dir(biz_id, create=True)
+    # Replace any previous logo files for this business.
+    for existing in os.listdir(upload_dir):
+        if existing.startswith("logo."):
+            try:
+                os.remove(os.path.join(upload_dir, existing))
+            except OSError:
+                pass
+
+    stored_name = f"logo.{ext}"
+    dest = os.path.join(upload_dir, stored_name)
+    file.save(dest)
+    logo_path = f"uploads/businesses/{biz_id}/{stored_name}"
+    ts = now_iso()
+    db.execute(
+        """UPDATE businesses
+           SET logo_path = ?, updated_at = ?
+           WHERE id = ?""",
+        (logo_path, ts, biz_id),
+    )
+    log_activity(
+        db,
+        action="business.logo_upload",
+        business_id=biz_id,
+        entity_type="business",
+        entity_id=biz_id,
+        details={"logo_path": logo_path},
+        created_at=ts,
+    )
+    db.commit()
+    return jsonify(row_to_business(get_business_by_id(db, biz_id)))
+
+
+@app.route("/api/business/branding/logo", methods=["DELETE"])
+@admin_required
+def delete_business_logo():
+    db = get_db()
+    biz_id = current_business_id()
+    if not biz_id:
+        return jsonify({"error": "No business selected"}), 400
+    row = get_business_by_id(db, biz_id)
+    if not row:
+        return jsonify({"error": "Business not found"}), 404
+
+    upload_dir = business_uploads_dir(biz_id, create=False)
+    if os.path.isdir(upload_dir):
+        for existing in os.listdir(upload_dir):
+            if existing.startswith("logo."):
+                try:
+                    os.remove(os.path.join(upload_dir, existing))
+                except OSError:
+                    pass
+
+    ts = now_iso()
+    db.execute(
+        """UPDATE businesses
+           SET logo_path = NULL, updated_at = ?
+           WHERE id = ?""",
+        (ts, biz_id),
+    )
+    log_activity(
+        db,
+        action="business.logo_remove",
+        business_id=biz_id,
+        entity_type="business",
+        entity_id=biz_id,
+        details={},
+        created_at=ts,
+    )
+    db.commit()
+    return jsonify(row_to_business(get_business_by_id(db, biz_id)))
 
 
 @app.route("/api/platform/businesses/<int:business_id>", methods=["DELETE"])

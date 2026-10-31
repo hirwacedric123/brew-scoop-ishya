@@ -3,13 +3,28 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>Brew & Scoop — Stock Management</title>
-  <link rel="icon" type="image/png" href="{{ url_for('static', filename='img/logo.png') }}">
-  <link rel="apple-touch-icon" href="{{ url_for('static', filename='img/logo.png') }}">
+  {% set brand_name = current_business.name if current_business else 'Brew & Scoop' %}
+  {% set brand_logo = (current_business.logo_url if current_business and current_business.logo_url else url_for('static', filename='img/logo.png')) %}
+  {% set brand_primary = (current_business.primary_color if current_business and current_business.primary_color else '#2c1810') %}
+  {% set brand_accent = (current_business.accent_color if current_business and current_business.accent_color else '#c4a574') %}
+  <title>{{ brand_name }} — Stock Management</title>
+  <link rel="icon" type="image/png" href="{{ brand_logo }}">
+  <link rel="apple-touch-icon" href="{{ brand_logo }}">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,500&family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+  <style id="business-branding-vars">
+    :root {
+      --espresso: {{ brand_primary }};
+      --espresso-light: color-mix(in srgb, {{ brand_primary }} 82%, white);
+      --coffee: color-mix(in srgb, {{ brand_primary }} 72%, white);
+      --caramel: {{ brand_accent }};
+      --caramel-light: color-mix(in srgb, {{ brand_accent }} 78%, white);
+      --brand-primary: {{ brand_primary }};
+      --brand-accent: {{ brand_accent }};
+    }
+  </style>
 </head>
 <body>
   <div class="app">
@@ -19,9 +34,10 @@
     <aside class="sidebar" id="sidebar">
       <div class="brand">
         <img
-          src="{{ url_for('static', filename='img/logo.png') }}"
-          alt="Brew & Scoop"
+          src="{{ brand_logo }}"
+          alt="{{ brand_name }}"
           class="brand-logo"
+          id="brand-logo"
           width="220"
           height="220"
         >
@@ -94,6 +110,10 @@
         <button class="nav-item" data-view="products">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
           <span>Products</span>
+        </button>
+        <button class="nav-item" data-view="ingredients">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v6"/><path d="M6 8h12"/><path d="M8 8c0 6 4 12 4 12s4-6 4-12"/><path d="M9 22h6"/></svg>
+          <span>Ingredients</span>
         </button>
         {% endif %}
         {% if current_user.role in ['seller', 'stock_manager'] %}
@@ -209,6 +229,10 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
               Products
             </button>
+            <button type="button" class="quick-action" data-view="ingredients">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v6"/><path d="M6 8h12"/><path d="M8 8c0 6 4 12 4 12s4-6 4-12"/><path d="M9 22h6"/></svg>
+              Ingredients
+            </button>
             <button type="button" class="quick-action" data-view="sales">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-4 4 4 5-6"/></svg>
               Reports
@@ -284,6 +308,19 @@
               <span class="status-pill" id="low-stock-label"></span>
             </div>
             <div class="card-body card-body-flush" id="low-stock-list"></div>
+          </div>
+
+          <div class="card dashboard-card">
+            <div class="card-header">
+              <div class="card-title-group">
+                <span class="card-title-icon card-title-icon-amber">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                </span>
+                <h3>Expiring Soon</h3>
+              </div>
+              <span class="status-pill" id="expiring-lots-label"></span>
+            </div>
+            <div class="card-body card-body-flush" id="expiring-lots-list"></div>
           </div>
 
           <div class="card dashboard-card">
@@ -392,6 +429,53 @@
               </tr>
             </thead>
             <tbody id="products-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Ingredients -->
+      <section id="view-ingredients" class="view">
+        <header class="topbar">
+          <div class="topbar-heading">
+            <div>
+              <p class="page-eyebrow page-eyebrow-coffee">Inventory</p>
+              <h2>Ingredients</h2>
+              <p>Raw materials used in recipe products</p>
+            </div>
+          </div>
+          {% if current_user.role != 'supervisor' %}
+          <button class="btn btn-primary" id="btn-add-ingredient" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+            Add Ingredient
+          </button>
+          {% endif %}
+        </header>
+
+        <div class="toolbar">
+          <div class="search-box">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <input type="search" id="ingredient-search" placeholder="Search ingredients...">
+          </div>
+          <label class="checkbox-label">
+            <input type="checkbox" id="ingredient-low-stock-filter"> Low stock only
+          </label>
+          <span class="toolbar-count" id="ingredients-count"></span>
+        </div>
+
+        <div class="table-wrap table-premium">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Ingredient</th>
+                <th>Unit</th>
+                <th>Stock</th>
+                <th>Cost / unit</th>
+                <th>Reorder</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="ingredients-table-body"></tbody>
           </table>
         </div>
       </section>
@@ -845,12 +929,81 @@
                     </div>
                   </div>
                   <div class="form-group">
+                    <label for="cup-restock-expiry">Expiry date <span class="text-muted">(optional)</span></label>
+                    <input type="date" id="cup-restock-expiry">
+                    <p class="form-hint">Creates a FIFO lot; soonest-expiring cups are used first.</p>
+                  </div>
+                  <div class="form-group">
                     <label for="cup-restock-notes">Notes</label>
                     <input type="text" id="cup-restock-notes" placeholder="Supplier, delivery ref...">
                   </div>
                   <button type="submit" class="btn btn-primary btn-block btn-lg">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
                     Add Cups
+                  </button>
+                </form>
+              </div>
+            </div>
+
+            <div class="card restock-card restock-card-add" id="ingredient-restock-card">
+              <div class="card-header">
+                <div class="card-title-group">
+                  <span class="card-title-icon card-title-icon-mint">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v6"/><path d="M6 8h12"/><path d="M8 8c0 6 4 12 4 12s4-6 4-12"/></svg>
+                  </span>
+                  <div>
+                    <h3>Restock Ingredient</h3>
+                    <span class="restock-card-desc">Add raw materials for recipe products</span>
+                  </div>
+                </div>
+              </div>
+              <div class="card-body">
+                <form id="ingredient-restock-form">
+                  <div class="form-group">
+                    <label for="ingredient-restock-select">Ingredient</label>
+                    <select id="ingredient-restock-select" required>
+                      <option value="">Choose an ingredient...</option>
+                    </select>
+                  </div>
+                  <div class="restock-preview" id="ingredient-restock-preview" hidden>
+                    <div class="restock-preview-header">
+                      <div>
+                        <strong id="ingredient-restock-preview-name"></strong>
+                        <span id="ingredient-restock-preview-meta"></span>
+                      </div>
+                    </div>
+                    <div class="restock-preview-stats">
+                      <div class="restock-stat">
+                        <span>Current</span>
+                        <strong id="ingredient-restock-preview-current">—</strong>
+                      </div>
+                      <div class="restock-stat restock-stat-arrow">→</div>
+                      <div class="restock-stat restock-stat-new">
+                        <span>After restock</span>
+                        <strong id="ingredient-restock-preview-after">—</strong>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="form-group">
+                    <label for="ingredient-restock-quantity">Quantity to Add</label>
+                    <input type="number" id="ingredient-restock-quantity" min="0.0001" step="any" value="100" required>
+                  </div>
+                  <div class="form-group">
+                    <label for="ingredient-restock-cost">Purchase cost per unit (RWF)</label>
+                    <input type="number" id="ingredient-restock-cost" min="0" step="any" value="0">
+                    <p class="form-hint">Cost for this delivery lot. Remaining stock cost is the FIFO average of open lots.</p>
+                  </div>
+                  <div class="form-group">
+                    <label for="ingredient-restock-expiry">Expiry date <span class="text-muted">(optional)</span></label>
+                    <input type="date" id="ingredient-restock-expiry">
+                  </div>
+                  <div class="form-group">
+                    <label for="ingredient-restock-notes">Notes</label>
+                    <input type="text" id="ingredient-restock-notes" placeholder="Supplier, delivery ref...">
+                  </div>
+                  <button type="submit" class="btn btn-primary btn-block btn-lg">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+                    Add Ingredient Stock
                   </button>
                 </form>
               </div>
@@ -917,7 +1070,13 @@
                     <div class="form-group">
                       <label for="restock-cost-price">Purchase Price (RWF)</label>
                       <input type="number" id="restock-cost-price" min="0" step="100" value="0">
-                      <p class="form-hint">What you paid per unit for this delivery. Updates the product’s cost.</p>
+                      <p class="form-hint">What you paid per unit for this delivery lot. Display cost becomes the average of remaining lots.</p>
+                    </div>
+
+                    <div class="form-group">
+                      <label for="restock-expiry">Expiry date <span class="text-muted">(optional)</span></label>
+                      <input type="date" id="restock-expiry">
+                      <p class="form-hint">Each restock creates a FIFO lot; sales use soonest-expiring stock first.</p>
                     </div>
 
                     <div class="form-group">
@@ -982,6 +1141,14 @@
                       <input type="number" id="adjust-quantity" min="0" required>
                     </div>
 
+                    <div class="form-group" id="adjust-lot-group" hidden>
+                      <label for="adjust-lot">Waste / decrease from lot <span class="text-muted">(optional)</span></label>
+                      <select id="adjust-lot">
+                        <option value="">FEFO — oldest / soonest expiry first</option>
+                      </select>
+                      <p class="form-hint">Pick a lot for spoilage; leave blank to consume by FEFO.</p>
+                    </div>
+
                     <div class="form-group">
                       <label for="adjust-notes">Reason</label>
                       <input type="text" id="adjust-notes" placeholder="Stocktake, spoilage, etc.">
@@ -1012,9 +1179,52 @@
 
             <div class="restock-tip">
               <strong>Tip</strong>
-              <p>Use <em>Restock</em> when receiving deliveries. Use <em>Adjust</em> to correct counts after a stocktake.</p>
+              <p>Use <em>Restock</em> when receiving deliveries. Use <em>Adjust</em> to correct counts after a stocktake. Stock is consumed FIFO / FEFO by lot.</p>
             </div>
           </aside>
+        </div>
+
+        <div class="card restock-lots-card" id="restock-lots-card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="card-title-icon card-title-icon-mint">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+              </span>
+              <div>
+                <h3>Open Lots (FIFO)</h3>
+                <span class="restock-card-desc">Remaining stock by delivery / expiry</span>
+              </div>
+            </div>
+            <div class="lots-filters">
+              <select id="lots-pool-filter" aria-label="Filter lots by pool">
+                <option value="">All pools</option>
+                <option value="product">Products</option>
+                <option value="ingredient">Ingredients</option>
+                <option value="cup">Cups</option>
+              </select>
+              <button type="button" class="btn btn-ghost btn-sm" id="lots-refresh-btn">Refresh</button>
+            </div>
+          </div>
+          <div class="card-body card-body-flush">
+            <div class="table-wrap table-premium lots-table-wrap">
+              <table class="data-table" id="lots-table">
+                <thead>
+                  <tr>
+                    <th>Item</th>
+                    <th>Pool</th>
+                    <th>Received</th>
+                    <th>Expiry</th>
+                    <th>Remaining</th>
+                    <th>Unit cost</th>
+                    <th>Value</th>
+                  </tr>
+                </thead>
+                <tbody id="lots-table-body">
+                  <tr><td colspan="7" class="text-muted">Loading lots…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -1270,7 +1480,7 @@
               {% if current_user.role == 'admin' %}
               <p class="page-eyebrow page-eyebrow-danger">Settings</p>
               <h2>Administration</h2>
-              <p>Manage team, categories, and activity</p>
+              <p>Manage team, branding, categories, and activity</p>
               {% elif current_user.role == 'stock_manager' %}
               <p class="page-eyebrow page-eyebrow-danger">Oversight</p>
               <h2>Activity</h2>
@@ -1288,6 +1498,7 @@
           {% if current_user.role == 'admin' %}
           <button type="button" class="admin-tab active" data-admin-tab="team">Team</button>
           <button type="button" class="admin-tab" data-admin-tab="categories">Categories</button>
+          <button type="button" class="admin-tab" data-admin-tab="branding">Branding</button>
           {% endif %}
           {% if current_user.role in ['admin', 'supervisor', 'stock_manager'] or current_user.is_platform_admin %}
           <button type="button" class="admin-tab{% if current_user.role == 'stock_manager' %} active{% endif %}" data-admin-tab="activity">Activity Log</button>
@@ -1349,6 +1560,73 @@
               </thead>
               <tbody id="categories-table-body"></tbody>
             </table>
+          </div>
+        </div>
+
+        <div id="admin-panel-branding" class="admin-panel" hidden>
+          <div class="admin-panel-header">
+            <div>
+              <h3>Business Branding</h3>
+              <p class="text-muted admin-panel-desc">
+                Custom logo and colors for
+                <strong id="branding-business-name">{{ brand_name }}</strong>
+              </p>
+            </div>
+          </div>
+
+          <div class="branding-layout">
+            <form id="branding-colors-form" class="branding-card">
+              <h4>Colors</h4>
+              <p class="text-muted branding-card-desc">Primary colors the dashboard, buttons, and accents.</p>
+              <div class="branding-color-grid">
+                <label class="branding-color-field" for="branding-primary">
+                  <span>Primary</span>
+                  <span class="branding-color-controls">
+                    <input type="color" id="branding-primary" name="primary_color" value="{{ brand_primary }}">
+                    <input type="text" id="branding-primary-hex" class="branding-hex" maxlength="7" value="{{ brand_primary }}" spellcheck="false" aria-label="Primary hex color">
+                  </span>
+                </label>
+                <label class="branding-color-field" for="branding-accent">
+                  <span>Accent</span>
+                  <span class="branding-color-controls">
+                    <input type="color" id="branding-accent" name="accent_color" value="{{ brand_accent }}">
+                    <input type="text" id="branding-accent-hex" class="branding-hex" maxlength="7" value="{{ brand_accent }}" spellcheck="false" aria-label="Accent hex color">
+                  </span>
+                </label>
+              </div>
+              <div class="branding-preview" id="branding-preview" aria-hidden="true">
+                <span class="branding-preview-swatch branding-preview-primary"></span>
+                <span class="branding-preview-swatch branding-preview-accent"></span>
+                <span class="branding-preview-chip">Preview</span>
+              </div>
+              <div class="branding-actions">
+                <button type="button" class="btn btn-ghost" id="btn-branding-reset-colors">Reset defaults</button>
+                <button type="submit" class="btn btn-primary" id="btn-save-branding-colors">Save colors</button>
+              </div>
+            </form>
+
+            <div class="branding-card">
+              <h4>Logo</h4>
+              <p class="text-muted branding-card-desc">PNG, JPG, or WebP up to 2 MB. Shown in the sidebar and on invoices.</p>
+              <div class="branding-logo-row">
+                <div class="branding-logo-preview-wrap">
+                  <img
+                    src="{{ brand_logo }}"
+                    alt="{{ brand_name }} logo preview"
+                    class="branding-logo-preview"
+                    id="branding-logo-preview"
+                  >
+                </div>
+                <div class="branding-logo-actions">
+                  <label class="btn btn-ghost" for="branding-logo-file">
+                    Choose image
+                    <input type="file" id="branding-logo-file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" hidden>
+                  </label>
+                  <button type="button" class="btn btn-primary" id="btn-upload-logo" disabled>Upload logo</button>
+                  <button type="button" class="btn btn-ghost" id="btn-remove-logo">Remove logo</button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
         {% endif %}
@@ -1807,7 +2085,7 @@
 
   <!-- Product Modal -->
   <div class="modal-overlay" id="product-modal" hidden>
-    <div class="modal">
+    <div class="modal modal-lg">
       <div class="modal-header">
         <h3 id="product-modal-title">Add Product</h3>
         <button class="modal-close" type="button" data-close-modal>&times;</button>
@@ -1825,14 +2103,26 @@
             <option value="">Choose a category...</option>
           </select>
         </div>
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="product-uses-recipe">
+            Made from ingredients (recipe)
+          </label>
+          <p class="form-hint">Stock is deducted from ingredients when this product is sold.</p>
+        </div>
         <div class="form-row">
           <div class="form-group">
             <label for="product-price">Sell Price (RWF) *</label>
             <input type="number" id="product-price" min="0" step="100" required>
           </div>
-          <div class="form-group">
+          <div class="form-group" id="product-cost-group">
             <label for="product-cost-price">Purchase Price (RWF)</label>
             <input type="number" id="product-cost-price" min="0" step="100" value="0">
+          </div>
+          <div class="form-group" id="product-recipe-cost-group" hidden>
+            <label>Recipe cost (RWF)</label>
+            <input type="text" id="product-recipe-cost" readonly value="0">
+            <p class="form-hint" id="product-recipe-margin-hint"></p>
           </div>
         </div>
         <div id="product-stock-fields">
@@ -1850,6 +2140,23 @@
         <p class="form-hint" id="product-cup-hint" hidden>
           This product uses shared cup inventory. Restock cups on the Restock page.
         </p>
+        <div id="product-recipe-fields" hidden>
+          <div class="form-group">
+            <label>Composition</label>
+            <div class="recipe-editor" id="recipe-editor">
+              <div class="recipe-editor-head">
+                <span>Ingredient</span>
+                <span>Qty</span>
+                <span>Unit</span>
+                <span></span>
+              </div>
+              <div id="recipe-lines"></div>
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-add-recipe-line">
+                + Add ingredient
+              </button>
+            </div>
+          </div>
+        </div>
         <div class="form-group">
           <label for="product-description">Description</label>
           <textarea id="product-description" rows="2" placeholder="Optional details..."></textarea>
@@ -1859,6 +2166,68 @@
           <button type="submit" class="btn btn-primary" id="product-form-submit">Save Product</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Ingredient Modal -->
+  <div class="modal-overlay" id="ingredient-modal" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="ingredient-modal-title">Add Ingredient</h3>
+        <button class="modal-close" type="button" data-close-modal>&times;</button>
+      </div>
+      <form id="ingredient-form">
+        <input type="hidden" id="ingredient-id">
+        <div class="form-group">
+          <label for="ingredient-name">Name *</label>
+          <input type="text" id="ingredient-name" required placeholder="e.g. Beetroot, Sugar">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="ingredient-unit">Unit *</label>
+            <select id="ingredient-unit" required>
+              <option value="g">g (grams)</option>
+              <option value="ml">ml (millilitres)</option>
+              <option value="pcs">pcs (pieces)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="ingredient-cost">Cost per unit (RWF)</label>
+            <input type="number" id="ingredient-cost" min="0" step="any" value="0">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group" id="ingredient-qty-group">
+            <label for="ingredient-quantity">Initial quantity</label>
+            <input type="number" id="ingredient-quantity" min="0" step="any" value="0">
+          </div>
+          <div class="form-group">
+            <label for="ingredient-reorder">Low stock alert</label>
+            <input type="number" id="ingredient-reorder" min="0" step="any" value="0">
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" data-close-modal>Cancel</button>
+          <button type="submit" class="btn btn-primary">Save Ingredient</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Delete Ingredient Modal -->
+  <div class="modal-overlay" id="delete-ingredient-modal" hidden>
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h3>Delete Ingredient</h3>
+        <button class="modal-close" type="button" data-close-modal>&times;</button>
+      </div>
+      <div style="padding: 0 1.5rem 1.5rem;">
+        <p>Delete <strong id="delete-ingredient-name"></strong>? This cannot be undone.</p>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" data-close-modal>Cancel</button>
+          <button type="button" class="btn btn-primary" id="confirm-delete-ingredient" style="background: var(--danger);">Delete</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1964,14 +2333,15 @@
       <div class="invoice" id="invoice-print-area">
         <div class="invoice-brand">
           <img
-            src="{{ url_for('static', filename='img/logo.png') }}"
-            alt="Brew & Scoop"
+            src="{{ brand_logo }}"
+            alt="{{ brand_name }}"
             class="invoice-logo"
+            id="invoice-logo"
             width="176"
             height="132"
           >
           <div class="invoice-brand-text">
-            <h2>Brew &amp; Scoop</h2>
+            <h2 id="invoice-business-name">{{ brand_name }}</h2>
             <p>Sales Invoice</p>
           </div>
         </div>

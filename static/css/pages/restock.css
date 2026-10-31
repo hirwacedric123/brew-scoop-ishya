@@ -292,6 +292,44 @@
   margin-bottom: 1.25rem;
 }
 
+.restock-lots-card {
+  margin-top: 1.5rem;
+  border-top: 3px solid var(--mint);
+}
+
+.restock-lots-card .card-header {
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.lots-filters {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.lots-filters select {
+  min-width: 9rem;
+}
+
+.lots-table-wrap {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.lot-expiry {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.lot-expiry.soon {
+  color: var(--caramel);
+}
+
+.lot-expiry.expired {
+  color: var(--danger);
+}
+
 /* ── Responsive ───────────────────────────────────────────────────────────── */
 
 @media (max-width: 1100px) {
