@@ -687,7 +687,7 @@ function loadAdminView() {
 }
 
 const DEFAULT_BRANDING = {
-  logo_url: "/static/img/logo.png",
+  logo_url: "/static/img/logo.png?v=cundino1",
   primary_color: "#012100",
   accent_color: "#efd196",
 };
@@ -3473,7 +3473,7 @@ function printInvoice() {
   const existing = document.getElementById("invoice-print-root");
   if (existing) existing.remove();
 
-  const logoSrc = area.querySelector(".invoice-logo")?.getAttribute("src") || "/static/img/logo.png";
+  const logoSrc = area.querySelector(".invoice-logo")?.getAttribute("src") || "/static/img/logo.png?v=cundino1";
   const clone = area.cloneNode(true);
   const logo = clone.querySelector(".invoice-logo");
   if (logo) {

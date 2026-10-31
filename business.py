@@ -11,7 +11,7 @@ ROLES = ("admin", "supervisor", "stock_manager", "seller")
 
 DEFAULT_PRIMARY_COLOR = "#012100"
 DEFAULT_ACCENT_COLOR = "#efd196"
-DEFAULT_LOGO_URL = "/static/img/logo.png"
+DEFAULT_LOGO_URL = "/static/img/logo.png?v=cundino1"
 LEGACY_DEFAULT_PRIMARY_COLOR = "#2c1810"
 LEGACY_DEFAULT_ACCENT_COLOR = "#c4a574"
 HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
