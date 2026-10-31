@@ -310,13 +310,16 @@ def password_change_exempt():
 
 def pin_change_exempt():
     path = request.path
-    if path in ("/", "/login"):
+    # Password change must finish first. Blocking it for a pending PIN
+    # bounces /change-password back to /, which then bounces here again.
+    if path in ("/", "/login", "/change-password"):
         return True
     for prefix in (
         "/api/auth/pin",
         "/api/auth/logout",
         "/api/auth/me",
         "/api/auth/switch-business",
+        "/api/auth/change-password",
         "/static/",
     ):
         if path == prefix or path.startswith(prefix):
