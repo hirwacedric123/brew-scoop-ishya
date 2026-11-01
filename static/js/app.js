@@ -5716,8 +5716,111 @@ function renderSalesDonut(canvasId, legendId, items, labelKey, valueKey, colorFn
   }
 }
 
+function renderSalesFifoSection(inventory, from, to) {
+  const fifoStats = document.getElementById("sales-fifo-stats");
+  const poolsEl = document.getElementById("sales-fifo-pools");
+  const expiringEl = document.getElementById("sales-fifo-expiring");
+  const wasteEl = document.getElementById("sales-fifo-waste");
+  const wasteRange = document.getElementById("sales-fifo-waste-range");
+  const invLabel = document.getElementById("sales-fifo-inv-label");
+  const inv = inventory || {};
+
+  if (fifoStats) {
+    const expCount = inv.expiring_lots_count || 0;
+    const days = inv.within_days || 7;
+    fifoStats.innerHTML = `
+      ${statCard("stock", UI_ICONS.stock, "Inventory Value", fmt.format(inv.inventory_value || 0), `${fmtNum.format(inv.open_lots_count || 0)} open lots`)}
+      ${statCard("alert", UI_ICONS.alert, "Expiring Soon", fmt.format(inv.expiring_lots_value || 0), expCount ? `${fmtNum.format(expCount)} within ${days} days` : "None soon")}
+      ${statCard("sales", UI_ICONS.chart, "Waste in Period", fmt.format(inv.waste_value || 0), `${fmtNum.format(inv.waste_count || 0)} write-off${(inv.waste_count || 0) === 1 ? "" : "s"}`)}
+    `;
+  }
+
+  if (invLabel) {
+    invLabel.textContent = `${fmt.format(inv.inventory_value || 0)} on hand · lot-based`;
+  }
+
+  const byPool = inv.by_pool || {};
+  const poolRows = [
+    { key: "product", label: "Products" },
+    { key: "ingredient", label: "Ingredients" },
+    { key: "cup", label: "Cups" },
+  ];
+  if (poolsEl) {
+    poolsEl.innerHTML = poolRows
+      .map(
+        (p) => `
+      <div class="sales-fifo-pool">
+        <span class="sales-fifo-pool-label">${esc(p.label)}</span>
+        <strong>${fmt.format(byPool[p.key] || 0)}</strong>
+      </div>`
+      )
+      .join("");
+  }
+
+  const expiring = inv.expiring_lots || [];
+  if (expiringEl) {
+    if (!expiring.length) {
+      expiringEl.innerHTML = emptyState(
+        UI_ICONS.check,
+        "No expiry pressure",
+        "No open lots expire in the next 7 days.",
+        true
+      );
+    } else {
+      expiringEl.innerHTML = expiring
+        .map((lot) => {
+          const badgeClass = lot.expired ? "out" : "low";
+          const badgeText = lot.expired ? "Expired" : lot.expiry_date;
+          return `
+        <div class="alert-row">
+          <div class="alert-row-info">
+            <div class="product-avatar product-avatar-sm">${esc(productInitials(lot.item_name || lot.pool))}</div>
+            <div>
+              <strong>${esc(lot.item_name || "Lot")}</strong>
+              <span>${esc(lot.pool)} · ${fmtNum.format(lot.qty_remaining)} left · ${fmt.format(lot.value || 0)}</span>
+            </div>
+          </div>
+          <span class="badge badge-stock ${badgeClass}">${esc(badgeText)}</span>
+        </div>`;
+        })
+        .join("");
+    }
+  }
+
+  if (wasteRange) wasteRange.textContent = `(${formatRangeLabel(from, to)})`;
+  const wasteLines = inv.waste_lines || [];
+  if (wasteEl) {
+    if (!wasteLines.length) {
+      wasteEl.innerHTML = emptyState(
+        UI_ICONS.check,
+        "No write-offs",
+        "No lot-based stock decreases in this period.",
+        true
+      );
+    } else {
+      wasteEl.innerHTML = wasteLines
+        .slice(0, 8)
+        .map((line) => {
+          const when = formatLotDate(line.created_at) || "";
+          return `
+        <div class="alert-row">
+          <div class="alert-row-info">
+            <div class="product-avatar product-avatar-sm">${esc(productInitials(line.item_name || line.pool))}</div>
+            <div>
+              <strong>${esc(line.item_name || "Item")}</strong>
+              <span>${esc(line.pool)} · ${fmtNum.format(line.quantity)} · lot #${line.lot_id}${when ? ` · ${esc(when)}` : ""}</span>
+            </div>
+          </div>
+          <span class="badge badge-stock out">${fmt.format(line.value || 0)}</span>
+        </div>`;
+        })
+        .join("");
+    }
+  }
+}
+
 function renderSalesReport(report) {
-  const { summary, daily_breakdown, payment_breakdown, category_breakdown, sales, from, to } = report;
+  const { summary, daily_breakdown, payment_breakdown, category_breakdown, sales, from, to, inventory } = report;
 
   const marginLabel =
     summary.gross_margin_pct != null
@@ -5729,6 +5832,8 @@ function renderSalesReport(report) {
     ${statCard("stock", UI_ICONS.chart, "Cost of Goods", fmt.format(summary.cogs || 0), `${fmtNum.format(summary.units)} units sold`)}
     ${statCard("alert", UI_ICONS.calendar, "Active Days", daily_breakdown.length, `${fmtNum.format(summary.transactions)} sales recorded`)}
   `;
+
+  renderSalesFifoSection(inventory, from, to);
 
   document.getElementById("sales-range-label").textContent = formatRangeLabel(from, to);
 

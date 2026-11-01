@@ -818,6 +818,157 @@ def inventory_lot_value(db, business_id):
     return round(total, 2)
 
 
+def _pool_lot_value_and_count(db, business_id, pool):
+    table = _lot_table(pool)
+    row = db.execute(
+        f"""SELECT COALESCE(SUM(qty_remaining * unit_cost), 0) AS value,
+                  COALESCE(SUM(CASE WHEN qty_remaining > 0 THEN 1 ELSE 0 END), 0) AS open_lots
+           FROM {table} WHERE business_id = ?""",
+        (business_id,),
+    ).fetchone()
+    return round(float(row["value"] or 0), 2), int(row["open_lots"] or 0)
+
+
+def inventory_snapshot(db, business_id, within_days=7, expiring_limit=8):
+    """Current FIFO inventory value, open lots, and near-expiry summary."""
+    by_pool = {}
+    open_lots = 0
+    total_value = 0.0
+    for pool in VALID_POOLS:
+        value, count = _pool_lot_value_and_count(db, business_id, pool)
+        by_pool[pool] = value
+        open_lots += count
+        total_value += value
+
+    expiring = get_expiring_lots(db, business_id, within_days=within_days)
+    expiring_value = round(sum(float(lot.get("value") or 0) for lot in expiring), 2)
+    return {
+        "inventory_value": round(total_value, 2),
+        "by_pool": {
+            "product": by_pool.get(POOL_PRODUCT, 0.0),
+            "ingredient": by_pool.get(POOL_INGREDIENT, 0.0),
+            "cup": by_pool.get(POOL_CUP, 0.0),
+        },
+        "open_lots_count": open_lots,
+        "expiring_lots_count": len(expiring),
+        "expiring_lots_value": expiring_value,
+        "expiring_lots": expiring[:expiring_limit],
+        "within_days": int(within_days),
+    }
+
+
+def link_allocation_txs(
+    db,
+    business_id,
+    created_at,
+    *,
+    pool,
+    ref_id=None,
+    transaction_id=None,
+    ingredient_tx_id=None,
+    cup_tx_id=None,
+):
+    """Attach tx ids to recent adjustment allocations that have no checkout_ref."""
+    if not any((transaction_id, ingredient_tx_id, cup_tx_id)):
+        return 0
+    sets = []
+    set_params = []
+    if transaction_id is not None:
+        sets.append("transaction_id = ?")
+        set_params.append(transaction_id)
+    if ingredient_tx_id is not None:
+        sets.append("ingredient_tx_id = ?")
+        set_params.append(ingredient_tx_id)
+    if cup_tx_id is not None:
+        sets.append("cup_tx_id = ?")
+        set_params.append(cup_tx_id)
+    if not sets:
+        return 0
+
+    clauses = [
+        "business_id = ?",
+        "pool = ?",
+        "created_at = ?",
+        "quantity > 0",
+        "checkout_ref IS NULL",
+        "transaction_id IS NULL",
+        "ingredient_tx_id IS NULL",
+        "cup_tx_id IS NULL",
+    ]
+    where_params = [business_id, pool, created_at]
+    if pool != POOL_CUP:
+        clauses.append("ref_id = ?")
+        where_params.append(ref_id)
+
+    cur = db.execute(
+        f"""UPDATE lot_allocations
+           SET {', '.join(sets)}
+           WHERE {' AND '.join(clauses)}""",
+        [*set_params, *where_params],
+    )
+    return cur.rowcount or 0
+
+
+def period_waste_writeoffs(db, business_id, date_from, date_to, limit=50):
+    """
+    Write-off value from lot consumes that are not sales (checkout_ref IS NULL).
+    These are stock decreases from adjustments (FEFO or lot-specific).
+    """
+    rows = db.execute(
+        """SELECT a.*,
+                  CASE
+                    WHEN a.pool = 'product' THEN pr.name
+                    WHEN a.pool = 'ingredient' THEN ing.name
+                    WHEN a.pool = 'cup' THEN 'Shared Cups'
+                    ELSE NULL
+                  END AS item_name
+           FROM lot_allocations a
+           LEFT JOIN products pr
+             ON a.pool = 'product' AND pr.id = a.ref_id
+           LEFT JOIN ingredients ing
+             ON a.pool = 'ingredient' AND ing.id = a.ref_id
+           WHERE a.business_id = ?
+             AND a.quantity > 0
+             AND a.checkout_ref IS NULL
+             AND substr(a.created_at, 1, 10) >= ?
+             AND substr(a.created_at, 1, 10) <= ?
+           ORDER BY a.created_at DESC, a.id DESC""",
+        (business_id, date_from, date_to),
+    ).fetchall()
+
+    lines = []
+    total = 0.0
+    for row in rows:
+        qty = float(row["quantity"] or 0)
+        unit_cost = float(row["unit_cost"] or 0)
+        value = round(qty * unit_cost, 2)
+        total += value
+        lines.append(
+            {
+                "id": row["id"],
+                "pool": row["pool"],
+                "lot_id": row["lot_id"],
+                "ref_id": row["ref_id"],
+                "item_name": row["item_name"] or (
+                    "Shared Cups" if row["pool"] == POOL_CUP else "Item"
+                ),
+                "quantity": qty if row["pool"] == POOL_INGREDIENT else int(round(qty)),
+                "unit_cost": unit_cost,
+                "value": value,
+                "created_at": row["created_at"],
+                "transaction_id": row["transaction_id"],
+                "ingredient_tx_id": row["ingredient_tx_id"],
+                "cup_tx_id": row["cup_tx_id"],
+            }
+        )
+
+    return {
+        "value": round(total, 2),
+        "count": len(lines),
+        "lines": lines[:limit],
+    }
+
+
 def row_to_lot(row):
     keys = row.keys() if hasattr(row, "keys") else []
     qty_remaining = row["qty_remaining"]

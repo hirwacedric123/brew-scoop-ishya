@@ -2726,7 +2726,7 @@ def update_product(product_id):
     if should_sync_lots:
         diff = new_quantity - old_quantity
         try:
-            fifo.adjust_to_quantity(
+            _diff, allocs = fifo.adjust_to_quantity(
                 db,
                 fifo.POOL_PRODUCT,
                 biz_id,
@@ -2740,19 +2740,33 @@ def update_product(product_id):
             db.rollback()
             return jsonify({"error": str(exc)}), 400
         if diff != 0:
-            db.execute(
+            writeoff_unit = (
+                fifo.weighted_unit_cost(allocs) if diff < 0 and allocs else 0.0
+            )
+            cur = db.execute(
                 """INSERT INTO transactions
-                   (business_id, product_id, type, quantity, unit_price, total_amount, notes, created_at)
-                   VALUES (?, ?, 'adjustment', ?, ?, 0, ?, ?)""",
+                   (business_id, product_id, type, quantity, unit_price, cost_price,
+                    total_amount, notes, created_at)
+                   VALUES (?, ?, 'adjustment', ?, ?, ?, 0, ?, ?)""",
                 (
                     biz_id,
                     product_id,
                     diff,
                     float(data["price"]),
+                    writeoff_unit if diff < 0 else None,
                     f"Updated from product edit ({old_quantity} → {new_quantity})",
                     ts,
                 ),
             )
+            if diff < 0 and allocs:
+                fifo.link_allocation_txs(
+                    db,
+                    biz_id,
+                    ts,
+                    pool=fifo.POOL_PRODUCT,
+                    ref_id=product_id,
+                    transaction_id=cur.lastrowid,
+                )
         if not uses_recipe and not uses_cups:
             synced = db.execute(
                 "SELECT cost_price, quantity FROM products WHERE id = ?", (product_id,)
@@ -4669,7 +4683,7 @@ def adjust_stock():
         return jsonify({"error": "Invalid unit cost"}), 400
 
     try:
-        fifo.adjust_to_quantity(
+        _diff, allocs = fifo.adjust_to_quantity(
             db,
             fifo.POOL_PRODUCT,
             biz_id,
@@ -4684,19 +4698,30 @@ def adjust_stock():
     except fifo.InsufficientLotStock as exc:
         return jsonify({"error": str(exc)}), 400
 
-    db.execute(
+    writeoff_unit = fifo.weighted_unit_cost(allocs) if diff < 0 and allocs else 0.0
+    cur = db.execute(
         """INSERT INTO transactions
-           (business_id, product_id, type, quantity, unit_price, total_amount, notes, created_at)
-           VALUES (?, ?, 'adjustment', ?, ?, 0, ?, ?)""",
+           (business_id, product_id, type, quantity, unit_price, cost_price, total_amount, notes, created_at)
+           VALUES (?, ?, 'adjustment', ?, ?, ?, 0, ?, ?)""",
         (
             biz_id,
             product_id,
             diff,
             float(row["price"]),
+            writeoff_unit if diff < 0 else None,
             notes,
             ts,
         ),
     )
+    if diff < 0 and allocs:
+        fifo.link_allocation_txs(
+            db,
+            biz_id,
+            ts,
+            pool=fifo.POOL_PRODUCT,
+            ref_id=product_id,
+            transaction_id=cur.lastrowid,
+        )
     log_activity(
         db,
         action="stock.adjust",
@@ -4709,6 +4734,7 @@ def adjust_stock():
             "to_quantity": new_quantity,
             "diff": diff,
             "lot_id": lot_id,
+            "writeoff_unit_cost": writeoff_unit if diff < 0 else None,
         },
         created_at=ts,
     )
@@ -5172,7 +5198,7 @@ def adjust_ingredient():
         return jsonify({"error": "Invalid unit cost"}), 400
 
     try:
-        fifo.adjust_to_quantity(
+        _diff, allocs = fifo.adjust_to_quantity(
             db,
             fifo.POOL_INGREDIENT,
             biz_id,
@@ -5187,19 +5213,35 @@ def adjust_ingredient():
     except fifo.InsufficientLotStock as exc:
         return jsonify({"error": str(exc)}), 400
 
-    db.execute(
+    writeoff_unit = (
+        fifo.weighted_unit_cost(allocs) if diff < 0 and allocs else float(unit_cost or 0)
+    )
+    writeoff_total = (
+        round(abs(diff) * writeoff_unit, 2) if diff < 0 else 0.0
+    )
+    cur = db.execute(
         """INSERT INTO ingredient_transactions
            (business_id, ingredient_id, type, quantity, unit_cost, total_cost, notes, created_at)
-           VALUES (?, ?, 'adjustment', ?, ?, 0, ?, ?)""",
+           VALUES (?, ?, 'adjustment', ?, ?, ?, ?, ?)""",
         (
             biz_id,
             ingredient_id,
             diff,
-            unit_cost,
+            writeoff_unit if diff < 0 else unit_cost,
+            writeoff_total,
             notes,
             ts,
         ),
     )
+    if diff < 0 and allocs:
+        fifo.link_allocation_txs(
+            db,
+            biz_id,
+            ts,
+            pool=fifo.POOL_INGREDIENT,
+            ref_id=ingredient_id,
+            ingredient_tx_id=cur.lastrowid,
+        )
     _sync_recipe_product_costs_for_ingredient(db, biz_id, ingredient_id, ts)
     log_activity(
         db,
@@ -5214,6 +5256,7 @@ def adjust_ingredient():
             "to_quantity": new_quantity,
             "diff": diff,
             "lot_id": lot_id,
+            "writeoff_value": writeoff_total if diff < 0 else None,
         },
         created_at=ts,
     )
@@ -5336,7 +5379,7 @@ def adjust_cups():
     ts = now_iso()
     notes = (data.get("notes") or "Cup stock correction").strip()
     try:
-        fifo.adjust_to_quantity(
+        _diff, allocs = fifo.adjust_to_quantity(
             db,
             fifo.POOL_CUP,
             biz_id,
@@ -5350,11 +5393,19 @@ def adjust_cups():
     except fifo.InsufficientLotStock as exc:
         return jsonify({"error": str(exc)}), 400
 
-    db.execute(
+    cur = db.execute(
         """INSERT INTO cup_transactions (business_id, type, quantity, notes, created_at)
            VALUES (?, 'adjustment', ?, ?, ?)""",
         (biz_id, diff, notes, ts),
     )
+    if diff < 0 and allocs:
+        fifo.link_allocation_txs(
+            db,
+            biz_id,
+            ts,
+            pool=fifo.POOL_CUP,
+            cup_tx_id=cur.lastrowid,
+        )
     log_activity(
         db,
         action="cups.adjust",
@@ -5366,6 +5417,9 @@ def adjust_cups():
             "to_quantity": new_quantity,
             "diff": diff,
             "lot_id": lot_id,
+            "writeoff_unit_cost": (
+                fifo.weighted_unit_cost(allocs) if diff < 0 and allocs else None
+            ),
         },
         created_at=ts,
     )
@@ -5591,6 +5645,14 @@ def sales_report():
     categories = _category_breakdown(
         db, date_from, date_to, user_id, business_id=biz_id
     )
+    snapshot = fifo.inventory_snapshot(db, biz_id, within_days=7)
+    waste = fifo.period_waste_writeoffs(db, biz_id, date_from, date_to)
+    inventory = {
+        **snapshot,
+        "waste_value": waste["value"],
+        "waste_count": waste["count"],
+        "waste_lines": waste["lines"],
+    }
 
     return jsonify({
         "from": date_from,
@@ -5602,6 +5664,7 @@ def sales_report():
         "payment_breakdown": payments,
         "category_breakdown": categories,
         "sales": [row_to_transaction(r) for r in sales_rows],
+        "inventory": inventory,
     })
 
 

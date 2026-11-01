@@ -1355,6 +1355,7 @@
 
         <div id="sales-date-report">
           <div class="stats-grid" id="sales-summary-stats"></div>
+          <div class="stats-grid sales-fifo-stats" id="sales-fifo-stats"></div>
 
           <!-- Charts row: daily trend (left) + payment & category donuts (right) -->
           <div class="sales-charts-row" id="sales-charts-row" hidden>
@@ -1410,6 +1411,33 @@
               </div>
             </div>
           </div><!-- /sales-charts-row -->
+
+          <div class="sales-fifo-section" id="sales-fifo-section">
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title-group">
+                  <span class="card-title-icon card-title-icon-mint">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+                  </span>
+                  <h3>Inventory &amp; FIFO</h3>
+                </div>
+                <span class="text-muted" id="sales-fifo-inv-label">Lot-based stock value</span>
+              </div>
+              <div class="card-body">
+                <div class="sales-fifo-pools" id="sales-fifo-pools"></div>
+                <div class="sales-fifo-split">
+                  <div>
+                    <h4 class="sales-fifo-subhead">Expiring Soon</h4>
+                    <div id="sales-fifo-expiring" class="sales-fifo-list"></div>
+                  </div>
+                  <div>
+                    <h4 class="sales-fifo-subhead">Waste / Write-offs <span class="text-muted" id="sales-fifo-waste-range"></span></h4>
+                    <div id="sales-fifo-waste" class="sales-fifo-list"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
 
           <div class="sales-layout">
             <div class="card">
