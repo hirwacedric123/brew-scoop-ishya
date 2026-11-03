@@ -478,6 +478,61 @@
   }
 }
 
+/* ── Short viewports (laptop lids, short monitors) ──────────────────────── */
+
+@media (max-height: 820px) {
+  .sidebar {
+    padding-top: 1rem;
+    padding-bottom: 1rem;
+  }
+
+  .brand {
+    padding-bottom: 0.85rem;
+    margin-bottom: 0.75rem;
+    gap: 0.45rem;
+  }
+
+  .brand-logo {
+    max-width: 150px;
+  }
+
+  .business-switcher-trigger {
+    padding: 0.5rem 0.65rem;
+  }
+
+  .nav-item {
+    padding: 0.55rem 0.85rem;
+  }
+
+  .sidebar-footer {
+    padding-top: 0.75rem;
+  }
+
+  .user-panel {
+    margin-bottom: 0.5rem;
+  }
+}
+
+@media (max-height: 640px) {
+  .brand-logo {
+    max-width: 110px;
+  }
+
+  .brand {
+    padding-bottom: 0.65rem;
+    margin-bottom: 0.55rem;
+  }
+
+  .nav {
+    gap: 0.15rem;
+  }
+
+  .nav-item {
+    padding: 0.45rem 0.75rem;
+    font-size: 0.82rem;
+  }
+}
+
 /* ── Large screens ──────────────────────────────────────────────────────── */
 
 @media (min-width: 1600px) {

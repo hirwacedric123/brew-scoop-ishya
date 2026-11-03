@@ -55,6 +55,7 @@ from business import (
     LEGACY_DEFAULT_PRIMARY_COLOR,
     LOGO_ALLOWED_EXTENSIONS,
     business_uploads_dir,
+    assign_sole_admin_membership,
     create_business,
     current_business_id,
     default_business_name,
@@ -62,11 +63,13 @@ from business import (
     get_business_by_id,
     get_membership,
     init_business_tables,
+    list_business_admins,
     list_switchable_businesses,
     list_user_memberships,
     normalize_hex_color,
     platform_admin_required,
     row_to_business,
+    set_business_admin_access,
     set_session_business,
     upsert_membership,
 )
@@ -2227,7 +2230,11 @@ def admin_create_user():
             ts,
         ),
     )
-    upsert_membership(db, cur.lastrowid, biz_id, role, True, ts)
+    try:
+        upsert_membership(db, cur.lastrowid, biz_id, role, True, ts)
+    except ValueError as exc:
+        db.rollback()
+        return jsonify({"error": str(exc)}), 400
     log_activity(
         db,
         action="user.create",
@@ -2319,7 +2326,11 @@ def admin_update_user(user_id):
            WHERE id=?""",
         (display_name, email, role, is_active, password_hash, pin, ts, user_id),
     )
-    upsert_membership(db, user_id, biz_id, role, bool(is_active), ts)
+    try:
+        upsert_membership(db, user_id, biz_id, role, bool(is_active), ts)
+    except ValueError as exc:
+        db.rollback()
+        return jsonify({"error": str(exc)}), 400
     log_activity(
         db,
         action="user.update",
@@ -6358,6 +6369,186 @@ def admin_delete_category(category_id):
 
 # ── Platform businesses API ─────────────────────────────────────────────────
 
+@app.route("/api/platform/admins", methods=["GET"])
+@platform_admin_required
+def platform_list_admins():
+    """List shop admins and which businesses they can access."""
+    return jsonify(list_business_admins(get_db()))
+
+
+@app.route("/api/platform/admins", methods=["POST"])
+@platform_admin_required
+def platform_create_admin():
+    """Super admin: create a shop admin (or promote an existing user) linked to one business."""
+    data = request.get_json(silent=True) or {}
+    try:
+        business_id = int(data.get("business_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "business_id is required"}), 400
+
+    username = (data.get("username") or "").strip()
+    display_name = (data.get("display_name") or "").strip()
+    password = data.get("password") or ""
+    email = data.get("email")
+    pin_raw = data.get("pin")
+
+    db = get_db()
+    existing = get_user_by_username(db, username) if username else None
+    error = validate_user_payload(
+        {
+            "username": username,
+            "display_name": display_name or username,
+            "password": password,
+            "role": "admin",
+        },
+        creating=existing is None,
+    )
+    if error:
+        return jsonify({"error": error}), 400
+
+    email_error = validate_email(email)
+    if email_error:
+        return jsonify({"error": email_error}), 400
+    email = normalize_email(email)
+
+    biz = get_business_by_id(db, business_id)
+    if not biz or not biz["is_active"]:
+        return jsonify({"error": "Business not found or inactive"}), 400
+
+    ts = now_iso()
+    created = False
+
+    try:
+        if existing:
+            if row_to_user(existing).get("is_platform_admin"):
+                return jsonify({
+                    "error": "That username belongs to a super admin"
+                }), 400
+            # Optional password/pin updates when promoting an existing account.
+            if password:
+                db.execute(
+                    """UPDATE users
+                       SET password_hash = ?, must_change_password = 1, updated_at = ?
+                       WHERE id = ?""",
+                    (hash_password(password), ts, existing["id"]),
+                )
+            if display_name:
+                db.execute(
+                    "UPDATE users SET display_name = ?, updated_at = ? WHERE id = ?",
+                    (display_name, ts, existing["id"]),
+                )
+            if "email" in data:
+                db.execute(
+                    "UPDATE users SET email = ?, updated_at = ? WHERE id = ?",
+                    (email, ts, existing["id"]),
+                )
+            if pin_raw not in (None, ""):
+                pin_error, pin = validate_pin(pin_raw)
+                if pin_error:
+                    return jsonify({"error": pin_error}), 400
+                if pin_taken(db, pin, exclude_user_id=existing["id"], business_id=business_id):
+                    return jsonify({"error": "That PIN is already used in this business"}), 409
+                db.execute(
+                    """UPDATE users
+                       SET pin = ?, must_change_pin = 0, updated_at = ?
+                       WHERE id = ?""",
+                    (pin, ts, existing["id"]),
+                )
+            result = set_business_admin_access(
+                db, existing["id"], business_id, created_at=ts
+            )
+        else:
+            pin = None
+            must_change_pin = 0
+            if pin_raw not in (None, ""):
+                pin_error, pin = validate_pin(pin_raw)
+                if pin_error:
+                    return jsonify({"error": pin_error}), 400
+                if pin_taken(db, pin, business_id=business_id):
+                    return jsonify({"error": "That PIN is already used in this business"}), 409
+                must_change_pin = 1
+            cur = db.execute(
+                """INSERT INTO users
+                   (username, password_hash, display_name, email, role, is_active,
+                    must_change_password, pin, must_change_pin, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, 'admin', 1, 1, ?, ?, ?, ?)""",
+                (
+                    username,
+                    hash_password(password),
+                    display_name or username,
+                    email,
+                    pin,
+                    must_change_pin,
+                    ts,
+                    ts,
+                ),
+            )
+            result = set_business_admin_access(
+                db, cur.lastrowid, business_id, created_at=ts
+            )
+            created = True
+    except ValueError as exc:
+        db.rollback()
+        return jsonify({"error": str(exc)}), 400
+
+    log_activity(
+        db,
+        action="admin.create" if created else "admin.link_access",
+        business_id=business_id,
+        entity_type="user",
+        entity_id=result["id"],
+        details={
+            "username": result["username"],
+            "display_name": result["display_name"],
+            "business_id": business_id,
+            "business_name": biz["name"],
+            "created": created,
+        },
+        created_at=ts,
+    )
+    db.commit()
+    return jsonify({**result, "created": created}), 201 if created else 200
+
+
+@app.route("/api/platform/admins/<int:user_id>/access", methods=["PUT"])
+@platform_admin_required
+def platform_limit_admin_access(user_id):
+    """Super admin: limit a business admin to exactly one shop."""
+    data = request.get_json(silent=True) or {}
+    try:
+        business_id = int(data.get("business_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "business_id is required"}), 400
+
+    db = get_db()
+    current = get_current_user(db)
+    if current and current["id"] == user_id:
+        return jsonify({"error": "You cannot limit your own super-admin access"}), 400
+
+    ts = now_iso()
+    try:
+        result = set_business_admin_access(db, user_id, business_id, created_at=ts)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    log_activity(
+        db,
+        action="admin.limit_access",
+        business_id=business_id,
+        entity_type="user",
+        entity_id=user_id,
+        details={
+            "username": result["username"],
+            "display_name": result["display_name"],
+            "business_id": business_id,
+            "business_name": result["businesses"][0]["name"],
+        },
+        created_at=ts,
+    )
+    db.commit()
+    return jsonify(result)
+
+
 @app.route("/api/platform/businesses", methods=["GET"])
 @platform_admin_required
 def platform_list_businesses():
@@ -6403,56 +6594,61 @@ def platform_create_business():
     admin_password = data.get("admin_password") or ""
     admin_pin = data.get("admin_pin")
 
-    if admin_user_id is not None:
-        try:
-            admin_user_id = int(admin_user_id)
-        except (TypeError, ValueError):
-            return jsonify({"error": "Invalid admin user"}), 400
-        user = get_user_by_id(db, admin_user_id)
-        if not user:
-            db.rollback()
-            return jsonify({"error": "Admin user not found"}), 404
-        upsert_membership(db, admin_user_id, business_id, "admin", True, ts)
-    else:
-        if not admin_username or not admin_password:
-            return jsonify({
-                "error": "Provide admin_user_id or admin_username + admin_password"
-            }), 400
-        existing = get_user_by_username(db, admin_username)
-        if existing:
-            upsert_membership(db, existing["id"], business_id, "admin", True, ts)
-            admin_user_id = existing["id"]
+    try:
+        if admin_user_id is not None:
+            try:
+                admin_user_id = int(admin_user_id)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid admin user"}), 400
+            user = get_user_by_id(db, admin_user_id)
+            if not user:
+                db.rollback()
+                return jsonify({"error": "Admin user not found"}), 404
+            # Existing non–super admins are moved to this shop only.
+            assign_sole_admin_membership(db, admin_user_id, business_id, ts)
         else:
-            pin = None
-            if admin_pin not in (None, ""):
-                pin_error, pin = validate_pin(admin_pin)
-                if pin_error:
-                    return jsonify({"error": pin_error}), 400
-                if pin_taken(db, pin, business_id=business_id):
-                    return jsonify({"error": "That PIN is already used in this business"}), 409
-            cur = db.execute(
-                """INSERT INTO users
-                   (username, password_hash, display_name, role, is_active,
-                    must_change_password, pin, must_change_pin, created_at, updated_at)
-                   VALUES (?, ?, ?, 'admin', 1, 1, ?, ?, ?, ?)""",
-                (
-                    admin_username,
-                    hash_password(admin_password),
-                    admin_display or admin_username,
-                    pin,
-                    1 if pin else 0,
-                    ts,
-                    ts,
-                ),
-            )
-            admin_user_id = cur.lastrowid
-            upsert_membership(db, admin_user_id, business_id, "admin", True, ts)
+            if not admin_username or not admin_password:
+                return jsonify({
+                    "error": "Provide admin_user_id or admin_username + admin_password"
+                }), 400
+            existing = get_user_by_username(db, admin_username)
+            if existing:
+                assign_sole_admin_membership(db, existing["id"], business_id, ts)
+                admin_user_id = existing["id"]
+            else:
+                pin = None
+                if admin_pin not in (None, ""):
+                    pin_error, pin = validate_pin(admin_pin)
+                    if pin_error:
+                        return jsonify({"error": pin_error}), 400
+                    if pin_taken(db, pin, business_id=business_id):
+                        return jsonify({"error": "That PIN is already used in this business"}), 409
+                cur = db.execute(
+                    """INSERT INTO users
+                       (username, password_hash, display_name, role, is_active,
+                        must_change_password, pin, must_change_pin, created_at, updated_at)
+                       VALUES (?, ?, ?, 'admin', 1, 1, ?, ?, ?, ?)""",
+                    (
+                        admin_username,
+                        hash_password(admin_password),
+                        admin_display or admin_username,
+                        pin,
+                        1 if pin else 0,
+                        ts,
+                        ts,
+                    ),
+                )
+                admin_user_id = cur.lastrowid
+                upsert_membership(db, admin_user_id, business_id, "admin", True, ts)
 
-    # Keep the creating platform admin able to open the new business immediately.
-    creator = get_current_user(db)
-    if creator and row_to_user(creator).get("is_platform_admin"):
-        if creator["id"] != admin_user_id:
-            upsert_membership(db, creator["id"], business_id, "admin", True, ts)
+        # Keep the creating platform admin able to open the new business immediately.
+        creator = get_current_user(db)
+        if creator and row_to_user(creator).get("is_platform_admin"):
+            if creator["id"] != admin_user_id:
+                upsert_membership(db, creator["id"], business_id, "admin", True, ts)
+    except ValueError as exc:
+        db.rollback()
+        return jsonify({"error": str(exc)}), 400
 
     log_activity(
         db,

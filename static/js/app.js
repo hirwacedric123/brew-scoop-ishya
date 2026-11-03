@@ -1367,19 +1367,40 @@ async function loadBusinessesAdmin() {
   const tbody = document.getElementById("businesses-table-body");
   if (!tbody) return;
   showTableSkeleton("businesses-table-body", 5, 4);
+  showTableSkeleton("platform-admins-table-body", 5, 4);
   try {
-    state.businesses = await api("/api/platform/businesses");
-    if (!state.businesses.length) {
-      tbody.innerHTML = `<tr><td colspan="5" class="empty-state">No businesses yet</td></tr>`;
-      return;
+    const [businesses, admins] = await Promise.all([
+      api("/api/platform/businesses"),
+      api("/api/platform/admins"),
+    ]);
+    state.businesses = businesses;
+    state.platformAdmins = admins;
+    renderBusinessesTable(state.businesses);
+    renderPlatformAdminsTable(state.platformAdmins);
+  } catch (err) {
+    toast(err.message, "error");
+    tbody.innerHTML = `<tr><td colspan="5" class="empty-state">${esc(err.message)}</td></tr>`;
+    const adminsBody = document.getElementById("platform-admins-table-body");
+    if (adminsBody) {
+      adminsBody.innerHTML = `<tr><td colspan="5" class="empty-state">${esc(err.message)}</td></tr>`;
     }
-    const currentId = state.currentBusiness?.id;
-    const oldestId = Math.min(...state.businesses.map((b) => Number(b.id)));
-    tbody.innerHTML = state.businesses
-      .map((b) => {
-        const isCurrent = String(b.id) === String(currentId);
-        const isPrimary = Number(b.id) === oldestId;
-        return `
+  }
+}
+
+function renderBusinessesTable(businesses) {
+  const tbody = document.getElementById("businesses-table-body");
+  if (!tbody) return;
+  if (!businesses.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="empty-state">No businesses yet</td></tr>`;
+    return;
+  }
+  const currentId = state.currentBusiness?.id;
+  const oldestId = Math.min(...businesses.map((b) => Number(b.id)));
+  tbody.innerHTML = businesses
+    .map((b) => {
+      const isCurrent = String(b.id) === String(currentId);
+      const isPrimary = Number(b.id) === oldestId;
+      return `
       <tr>
         <td><strong>${esc(b.name)}</strong>${isCurrent ? ' <span class="badge badge-stock ok">Current</span>' : ""}${isPrimary ? ' <span class="badge badge-stock">Primary</span>' : ""}</td>
         <td>${esc(b.slug)}</td>
@@ -1408,11 +1429,164 @@ async function loadBusinessesAdmin() {
           </div>
         </td>
       </tr>`;
-      })
-      .join("");
+    })
+    .join("");
+}
+
+function renderPlatformAdminsTable(admins) {
+  const tbody = document.getElementById("platform-admins-table-body");
+  if (!tbody) return;
+  if (!admins.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="empty-state">No business admins yet</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = admins
+    .map((u) => {
+      const isSuper = !!u.is_platform_admin;
+      const isSelf = state.currentUser && u.id === state.currentUser.id;
+      const shops = (u.businesses || [])
+        .map((b) => esc(b.name))
+        .join(", ") || '<span class="text-muted">—</span>';
+      const multi = !isSuper && (u.businesses || []).length > 1;
+      return `
+      <tr>
+        <td><strong>${esc(u.display_name)}</strong></td>
+        <td>${esc(u.username)}</td>
+        <td><span class="badge badge-category">${isSuper ? "Super admin" : "Business admin"}</span></td>
+        <td>${shops}${multi ? ' <span class="badge badge-stock out">Needs limit</span>' : ""}</td>
+        <td>
+          ${
+            isSuper
+              ? '<span class="text-muted">All businesses</span>'
+              : `<button type="button" class="btn btn-ghost btn-sm" onclick="openLimitAdminAccess(${u.id})" ${isSelf ? "disabled" : ""}>Limit access</button>`
+          }
+        </td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function populatePlatformAdminBusinessSelect(selectEl, preferredId) {
+  if (!selectEl) return;
+  const businesses = (state.businesses || []).filter((b) => b.is_active);
+  selectEl.innerHTML = businesses
+    .map((b) => {
+      const selected = preferredId != null && Number(b.id) === Number(preferredId);
+      return `<option value="${b.id}" ${selected ? "selected" : ""}>${esc(b.name)}</option>`;
+    })
+    .join("");
+}
+
+function openAddPlatformAdmin() {
+  const form = document.getElementById("add-platform-admin-form");
+  if (!form) return;
+  form.reset();
+  const businesses = (state.businesses || []).filter((b) => b.is_active);
+  if (!businesses.length) {
+    toast("Create a business first", "error");
+    return;
+  }
+  const preferred = state.currentBusiness?.id || businesses[0].id;
+  populatePlatformAdminBusinessSelect(
+    document.getElementById("platform-admin-business"),
+    preferred
+  );
+  showModal("add-platform-admin-modal");
+  document.getElementById("platform-admin-username")?.focus();
+}
+
+async function savePlatformAdmin(e) {
+  e.preventDefault();
+  const businessId = document.getElementById("platform-admin-business")?.value;
+  const username = document.getElementById("platform-admin-username")?.value.trim() || "";
+  const displayName =
+    document.getElementById("platform-admin-display")?.value.trim() || "";
+  const email = document.getElementById("platform-admin-email")?.value.trim() || "";
+  const password = document.getElementById("platform-admin-password")?.value || "";
+  const pin = document.getElementById("platform-admin-pin")?.value.trim() || "";
+
+  if (!businessId) {
+    toast("Select a business", "error");
+    return;
+  }
+  if (!username) {
+    toast("Username is required", "error");
+    return;
+  }
+  if (!password || password.length < 6) {
+    toast("Password must be at least 6 characters", "error");
+    return;
+  }
+
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  if (submitBtn) submitBtn.disabled = true;
+  try {
+    const result = await api("/api/platform/admins", {
+      method: "POST",
+      body: JSON.stringify({
+        business_id: Number(businessId),
+        username,
+        display_name: displayName || username,
+        email: email || undefined,
+        password,
+        pin: pin || undefined,
+      }),
+    });
+    toast(result.created ? "Business admin created" : "Admin linked to business");
+    hideModal("add-platform-admin-modal");
+    loadBusinessesAdmin();
   } catch (err) {
     toast(err.message, "error");
-    tbody.innerHTML = `<tr><td colspan="5" class="empty-state">${esc(err.message)}</td></tr>`;
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+  }
+}
+
+function openLimitAdminAccess(userId) {
+  const admin = (state.platformAdmins || []).find((u) => u.id === userId);
+  if (!admin || admin.is_platform_admin) return;
+  const businesses = (state.businesses || []).filter((b) => b.is_active);
+  if (!businesses.length) {
+    toast("No active businesses available", "error");
+    return;
+  }
+  document.getElementById("limit-admin-user-id").value = admin.id;
+  document.getElementById("limit-admin-user-name").textContent =
+    admin.display_name || admin.username;
+  const select = document.getElementById("limit-admin-business");
+  const currentIds = new Set((admin.businesses || []).map((b) => Number(b.id)));
+  const preferred =
+    admin.businesses?.length === 1
+      ? admin.businesses[0].id
+      : businesses.find((b) => currentIds.has(Number(b.id)))?.id || businesses[0].id;
+  select.innerHTML = businesses
+    .map(
+      (b) =>
+        `<option value="${b.id}" ${Number(b.id) === Number(preferred) ? "selected" : ""}>${esc(b.name)}</option>`
+    )
+    .join("");
+  showModal("limit-admin-access-modal");
+}
+
+async function saveLimitAdminAccess(e) {
+  e.preventDefault();
+  const userId = document.getElementById("limit-admin-user-id")?.value;
+  const businessId = document.getElementById("limit-admin-business")?.value;
+  if (!userId || !businessId) return;
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  if (submitBtn) submitBtn.disabled = true;
+  try {
+    await api(`/api/platform/admins/${userId}/access`, {
+      method: "PUT",
+      body: JSON.stringify({ business_id: Number(businessId) }),
+    });
+    toast("Admin limited to one business");
+    hideModal("limit-admin-access-modal");
+    loadBusinessesAdmin();
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
   }
 }
 
@@ -7073,6 +7247,15 @@ document.addEventListener("DOMContentLoaded", () => {
   applyBusinessBranding(state.currentBusiness);
   document.getElementById("btn-add-business")?.addEventListener("click", openAddBusiness);
   document.getElementById("business-form")?.addEventListener("submit", saveBusiness);
+  document
+    .getElementById("btn-add-platform-admin")
+    ?.addEventListener("click", openAddPlatformAdmin);
+  document
+    .getElementById("add-platform-admin-form")
+    ?.addEventListener("submit", savePlatformAdmin);
+  document
+    .getElementById("limit-admin-access-form")
+    ?.addEventListener("submit", saveLimitAdminAccess);
   document.getElementById("business-edit-form")?.addEventListener("submit", saveBusinessEdit);
   document.getElementById("confirm-delete-business")?.addEventListener("click", confirmDeleteBusiness);
   document.getElementById("branding-colors-form")?.addEventListener("submit", saveBrandingColors);

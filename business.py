@@ -200,6 +200,23 @@ def list_switchable_businesses(db, user_id, is_platform_admin=False):
 def upsert_membership(db, user_id, business_id, role, is_active=True, created_at=None):
     if role not in ROLES:
         raise ValueError(f"Invalid role: {role}")
+    # Business admins are limited to one shop. Super admins may belong to many.
+    if (
+        role == "admin"
+        and is_active
+        and not user_is_platform_admin(db, user_id)
+    ):
+        other = db.execute(
+            """SELECT business_id FROM user_business_memberships
+               WHERE user_id = ? AND role = 'admin' AND is_active = 1
+                 AND business_id != ?""",
+            (user_id, business_id),
+        ).fetchone()
+        if other:
+            raise ValueError(
+                "Business admins can only access one shop. "
+                "Use Super Admin → Businesses → Limit access to move them."
+            )
     existing = get_membership(db, user_id, business_id)
     if existing:
         db.execute(
@@ -215,6 +232,116 @@ def upsert_membership(db, user_id, business_id, role, is_active=True, created_at
                VALUES (?, ?, ?, ?, ?)""",
             (user_id, business_id, role, 1 if is_active else 0, created_at),
         )
+
+
+def user_is_platform_admin(db, user_id):
+    row = db.execute(
+        "SELECT is_platform_admin FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    return bool(row and row["is_platform_admin"])
+
+
+def list_business_admins(db):
+    """Users with an admin membership, plus their shop access (for super-admin UI)."""
+    rows = db.execute(
+        """
+        SELECT u.id, u.username, u.display_name, u.email, u.is_active,
+               u.is_platform_admin,
+               m.business_id, m.role AS membership_role, m.is_active AS membership_active,
+               b.name AS business_name, b.slug AS business_slug, b.is_active AS business_is_active
+        FROM users u
+        JOIN user_business_memberships m ON m.user_id = u.id
+        JOIN businesses b ON b.id = m.business_id
+        WHERE m.role = 'admin'
+        ORDER BY u.is_platform_admin DESC, u.display_name COLLATE NOCASE ASC, b.name COLLATE NOCASE ASC
+        """
+    ).fetchall()
+
+    by_id = {}
+    for row in rows:
+        entry = by_id.get(row["id"])
+        if entry is None:
+            entry = {
+                "id": row["id"],
+                "username": row["username"],
+                "display_name": row["display_name"],
+                "email": (row["email"] or "").strip() if "email" in row.keys() else "",
+                "is_active": bool(row["is_active"]),
+                "is_platform_admin": bool(row["is_platform_admin"]),
+                "businesses": [],
+            }
+            by_id[row["id"]] = entry
+        entry["businesses"].append(
+            {
+                "id": row["business_id"],
+                "name": row["business_name"],
+                "slug": row["business_slug"],
+                "role": row["membership_role"],
+                "is_active": bool(row["membership_active"] and row["business_is_active"]),
+            }
+        )
+    return list(by_id.values())
+
+
+def set_business_admin_access(db, user_id, business_id, created_at=None):
+    """Limit a non–platform admin to exactly one business (admin role).
+
+    Removes all other memberships for that user. Platform admins cannot be limited.
+    """
+    user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        raise ValueError("User not found")
+    if user["is_platform_admin"]:
+        raise ValueError("Super admins already have access to all businesses")
+    if not user["is_active"]:
+        raise ValueError("Cannot assign an inactive account")
+
+    business = get_business_by_id(db, business_id)
+    if not business:
+        raise ValueError("Business not found")
+    if not business["is_active"]:
+        raise ValueError("Business is inactive")
+
+    if created_at is None:
+        from datetime import datetime, timezone
+
+        created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+    db.execute(
+        "DELETE FROM user_business_memberships WHERE user_id = ?",
+        (user_id,),
+    )
+    upsert_membership(db, user_id, business_id, "admin", True, created_at)
+    db.execute(
+        """UPDATE users
+           SET role = 'admin', updated_at = ?
+           WHERE id = ?""",
+        (created_at, user_id),
+    )
+    return {
+        "id": user["id"],
+        "username": user["username"],
+        "display_name": user["display_name"],
+        "is_platform_admin": False,
+        "businesses": [
+            {
+                "id": business["id"],
+                "name": business["name"],
+                "slug": business["slug"],
+                "role": "admin",
+                "is_active": True,
+            }
+        ],
+    }
+
+
+def assign_sole_admin_membership(db, user_id, business_id, created_at=None):
+    """Attach a non–platform user as sole-business admin (used when creating shops)."""
+    if user_is_platform_admin(db, user_id):
+        upsert_membership(db, user_id, business_id, "admin", True, created_at)
+        return
+    set_business_admin_access(db, user_id, business_id, created_at=created_at)
 
 
 def current_business_id():

@@ -16,6 +16,28 @@
   padding: 1.35rem 0.85rem;
   border-right: 1px solid rgba(196, 165, 116, 0.1);
   box-shadow: 4px 0 40px rgba(44, 24, 16, 0.18);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(196, 165, 116, 0.35) transparent;
+}
+
+.sidebar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar::-webkit-scrollbar-thumb {
+  background: rgba(196, 165, 116, 0.35);
+  border-radius: 999px;
+}
+
+.sidebar::-webkit-scrollbar-thumb:hover {
+  background: rgba(196, 165, 116, 0.55);
 }
 
 .brand {
@@ -274,7 +296,8 @@
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .nav-item {
@@ -327,6 +350,7 @@
   padding: 1rem 0.5rem 0;
   border-top: 1px solid rgba(245, 230, 211, 0.08);
   margin-top: auto;
+  flex-shrink: 0;
 }
 
 .user-panel {

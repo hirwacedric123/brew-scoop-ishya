@@ -188,6 +188,9 @@ ACTION_LABELS = {
     "business.branding_update": "Updated branding colors",
     "business.logo_upload": "Uploaded business logo",
     "business.logo_remove": "Removed business logo",
+    "admin.limit_access": "Limited admin to one business",
+    "admin.create": "Created business admin",
+    "admin.link_access": "Linked admin to a business",
 }
 
 
