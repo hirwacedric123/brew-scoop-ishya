@@ -6448,6 +6448,55 @@ function renderUsersTable(users) {
     .join("");
 }
 
+async function ensureTeamBusinessOptions(preferredId) {
+  const select = document.getElementById("user-business");
+  const group = document.getElementById("user-business-group");
+  const hint = document.getElementById("user-business-hint");
+  if (!select || !group) return;
+
+  const isPlatform = !!state.currentUser?.is_platform_admin;
+  let businesses = [];
+  if (isPlatform) {
+    try {
+      if (!state.businesses?.length) {
+        state.businesses = await api("/api/platform/businesses");
+      }
+      businesses = (state.businesses || []).filter((b) => b.is_active);
+    } catch (err) {
+      toast(err.message, "error");
+      businesses = state.currentBusiness ? [state.currentBusiness] : [];
+    }
+    select.disabled = false;
+    if (hint) {
+      hint.textContent =
+        "Business admins can access only this shop. Super admins can move them between shops.";
+    }
+  } else {
+    businesses = state.currentBusiness ? [state.currentBusiness] : [];
+    select.disabled = true;
+    if (hint) {
+      hint.textContent = "This admin will be linked to your current business.";
+    }
+  }
+
+  const preferred = preferredId || state.currentBusiness?.id || businesses[0]?.id;
+  select.innerHTML = businesses
+    .map(
+      (b) =>
+        `<option value="${b.id}" ${Number(b.id) === Number(preferred) ? "selected" : ""}>${esc(b.name)}</option>`
+    )
+    .join("");
+}
+
+function syncUserBusinessField(preferredId) {
+  const group = document.getElementById("user-business-group");
+  const role = document.getElementById("user-role")?.value;
+  if (!group) return;
+  const show = role === "admin";
+  group.hidden = !show;
+  if (show) ensureTeamBusinessOptions(preferredId);
+}
+
 function openAddUser() {
   document.getElementById("user-modal-title").textContent = "Add Stock Manager";
   document.getElementById("user-form").reset();
@@ -6458,6 +6507,7 @@ function openAddUser() {
   document.getElementById("user-pin").value = "";
   document.getElementById("user-active-group").hidden = true;
   document.getElementById("user-role").value = "seller";
+  syncUserBusinessField(state.currentBusiness?.id);
   showModal("user-modal");
 }
 
@@ -6478,6 +6528,16 @@ function openEditUser(id) {
   document.getElementById("user-active-group").hidden = false;
   document.getElementById("user-role").value = user.role;
   document.getElementById("user-active").checked = user.is_active;
+  const linkedBiz =
+    user.business_id ||
+    user.linked_business_id ||
+    state.currentBusiness?.id;
+  syncUserBusinessField(linkedBiz);
+  // Super admins are not limited to one shop — hide the linker for them.
+  if (user.is_platform_admin) {
+    const group = document.getElementById("user-business-group");
+    if (group) group.hidden = true;
+  }
   showModal("user-modal");
 }
 
@@ -6490,22 +6550,31 @@ function openDeleteUser(id, name) {
 async function saveUser(e) {
   e.preventDefault();
   const id = document.getElementById("user-id").value;
+  const role = document.getElementById("user-role").value;
   const payload = {
     display_name: document.getElementById("user-display-name-input").value,
     email: document.getElementById("user-email-input").value,
-    role: document.getElementById("user-role").value,
+    role,
   };
 
   const password = document.getElementById("user-password").value;
   if (password) payload.password = password;
   const pin = document.getElementById("user-pin")?.value.trim() || "";
   if (pin) payload.pin = pin;
+  if (role === "admin") {
+    const businessId = document.getElementById("user-business")?.value;
+    if (businessId) payload.business_id = Number(businessId);
+  }
 
   try {
     if (id) {
       payload.is_active = document.getElementById("user-active").checked;
       await api(`/api/admin/users/${id}`, { method: "PUT", body: JSON.stringify(payload) });
-      toast("User updated");
+      toast(
+        role === "admin" && payload.business_id
+          ? "Admin updated and linked to business"
+          : "User updated"
+      );
     } else {
       payload.username = document.getElementById("user-username").value;
       if (!password) {
@@ -6513,10 +6582,18 @@ async function saveUser(e) {
         return;
       }
       await api("/api/admin/users", { method: "POST", body: JSON.stringify(payload) });
-      toast("Stock manager created");
+      toast(
+        role === "admin"
+          ? "Admin created and linked to business"
+          : "Stock manager created"
+      );
     }
     hideModal("user-modal");
     loadUsers();
+    if (state.currentUser?.is_platform_admin) {
+      // Keep Businesses → Business admins in sync if that panel was loaded.
+      state.platformAdmins = null;
+    }
   } catch (err) {
     toast(err.message, "error");
   }
@@ -7204,6 +7281,9 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("profile-display-name")?.addEventListener("input", previewProfileName);
   document.getElementById("btn-add-user")?.addEventListener("click", openAddUser);
   document.getElementById("user-form")?.addEventListener("submit", saveUser);
+  document.getElementById("user-role")?.addEventListener("change", () => {
+    syncUserBusinessField(state.currentBusiness?.id);
+  });
   document.getElementById("confirm-delete-user")?.addEventListener("click", confirmDeleteUser);
   document.getElementById("btn-add-category")?.addEventListener("click", openAddCategory);
   document.getElementById("category-form")?.addEventListener("submit", saveCategory);

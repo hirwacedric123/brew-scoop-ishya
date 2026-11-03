@@ -2205,12 +2205,26 @@ def admin_create_user():
     if err:
         return err
     role = data.get("role", "stock_manager")
+    current = get_current_user(db)
+    link_biz_id = biz_id
+    if role == "admin" and data.get("business_id") is not None:
+        try:
+            requested_biz = int(data.get("business_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid business"}), 400
+        if requested_biz != biz_id and not row_to_user(current).get("is_platform_admin"):
+            return jsonify({"error": "Only a super admin can link an admin to another business"}), 403
+        target = get_business_by_id(db, requested_biz)
+        if not target or not target["is_active"]:
+            return jsonify({"error": "Business not found or inactive"}), 400
+        link_biz_id = requested_biz
+
     pin = None
     if data.get("pin") not in (None, ""):
         pin_error, pin = validate_pin(data.get("pin"))
         if pin_error:
             return jsonify({"error": pin_error}), 400
-        if pin_taken(db, pin, business_id=biz_id):
+        if pin_taken(db, pin, business_id=link_biz_id):
             return jsonify({"error": "That PIN is already used by another account"}), 409
 
     ts = now_iso()
@@ -2231,20 +2245,24 @@ def admin_create_user():
         ),
     )
     try:
-        upsert_membership(db, cur.lastrowid, biz_id, role, True, ts)
+        if role == "admin":
+            set_business_admin_access(db, cur.lastrowid, link_biz_id, created_at=ts)
+        else:
+            upsert_membership(db, cur.lastrowid, biz_id, role, True, ts)
     except ValueError as exc:
         db.rollback()
         return jsonify({"error": str(exc)}), 400
     log_activity(
         db,
         action="user.create",
-        business_id=biz_id,
+        business_id=link_biz_id if role == "admin" else biz_id,
         entity_type="user",
         entity_id=cur.lastrowid,
         details={
             "username": data["username"].strip(),
             "role": role,
             "display_name": (data.get("display_name") or data["username"]).strip(),
+            "business_id": link_biz_id if role == "admin" else biz_id,
         },
     )
     db.commit()
@@ -2319,28 +2337,59 @@ def admin_update_user(user_id):
     if not membership:
         return jsonify({"error": "User not found in this business"}), 404
 
+    link_biz_id = biz_id
+    if role == "admin" and data.get("business_id") is not None:
+        try:
+            requested_biz = int(data.get("business_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid business"}), 400
+        if requested_biz != biz_id and not row_to_user(current).get("is_platform_admin"):
+            return jsonify({"error": "Only a super admin can link an admin to another business"}), 403
+        if row_to_user(row).get("is_platform_admin"):
+            return jsonify({"error": "Super admins already have access to all businesses"}), 400
+        target = get_business_by_id(db, requested_biz)
+        if not target or not target["is_active"]:
+            return jsonify({"error": "Business not found or inactive"}), 400
+        link_biz_id = requested_biz
+
     ts = now_iso()
+    # Keep the account active while linking memberships; apply is_active after.
     db.execute(
         """UPDATE users SET
-           display_name=?, email=?, role=?, is_active=?, password_hash=?, pin=?, updated_at=?
+           display_name=?, email=?, role=?, is_active=1, password_hash=?, pin=?, updated_at=?
            WHERE id=?""",
-        (display_name, email, role, is_active, password_hash, pin, ts, user_id),
+        (display_name, email, role, password_hash, pin, ts, user_id),
     )
     try:
-        upsert_membership(db, user_id, biz_id, role, bool(is_active), ts)
+        if role == "admin" and not row_to_user(row).get("is_platform_admin"):
+            set_business_admin_access(db, user_id, link_biz_id, created_at=ts)
+            if not is_active:
+                db.execute(
+                    """UPDATE user_business_memberships
+                       SET is_active = 0
+                       WHERE user_id = ? AND business_id = ?""",
+                    (user_id, link_biz_id),
+                )
+        else:
+            upsert_membership(db, user_id, biz_id, role, bool(is_active), ts)
+        db.execute(
+            "UPDATE users SET is_active = ?, updated_at = ? WHERE id = ?",
+            (1 if is_active else 0, ts, user_id),
+        )
     except ValueError as exc:
         db.rollback()
         return jsonify({"error": str(exc)}), 400
     log_activity(
         db,
         action="user.update",
-        business_id=biz_id,
+        business_id=link_biz_id if role == "admin" else biz_id,
         entity_type="user",
         entity_id=user_id,
         details={
             "display_name": display_name,
             "role": role,
             "is_active": bool(is_active),
+            "business_id": link_biz_id if role == "admin" else biz_id,
         },
     )
     db.commit()
