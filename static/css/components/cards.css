@@ -41,7 +41,7 @@
   align-items: center;
   padding: 1rem 1.35rem;
   border-bottom: 1px solid var(--border-subtle);
-  background: linear-gradient(to bottom, white, rgba(250, 246, 241, 0.5));
+  background: linear-gradient(to bottom, white, color-mix(in srgb, var(--foam) 50%, transparent));
 }
 
 .card-header h3 {
@@ -72,7 +72,7 @@
 }
 
 .list-item:hover {
-  background: rgba(245, 230, 211, 0.3);
+  background: color-mix(in srgb, var(--cream) 30%, transparent);
 }
 
 .list-item:last-child {

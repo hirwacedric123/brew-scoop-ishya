@@ -26,9 +26,9 @@
   align-items: center;
   padding: 3.5rem;
   background:
-    radial-gradient(ellipse at 25% 15%, rgba(196, 165, 116, 0.28) 0%, transparent 55%),
-    radial-gradient(ellipse at 75% 85%, rgba(245, 230, 211, 0.06) 0%, transparent 50%),
-    linear-gradient(165deg, var(--espresso) 0%, #1f0f08 60%, var(--espresso-light) 100%);
+    radial-gradient(ellipse at 25% 15%, color-mix(in srgb, var(--caramel) 38%, transparent) 0%, transparent 55%),
+    radial-gradient(ellipse at 75% 85%, color-mix(in srgb, var(--cream) 10%, transparent) 0%, transparent 50%),
+    linear-gradient(165deg, var(--espresso) 0%, var(--espresso-deep) 60%, var(--coffee) 100%);
   color: var(--cream);
   text-align: center;
   position: relative;
@@ -39,7 +39,7 @@
   content: "";
   position: absolute;
   inset: 0;
-  background-image: radial-gradient(rgba(245, 230, 211, 0.05) 1px, transparent 1px);
+  background-image: radial-gradient(color-mix(in srgb, var(--cream) 5%, transparent) 1px, transparent 1px);
   background-size: 28px 28px;
   pointer-events: none;
 }
@@ -52,7 +52,7 @@
   transform: translateX(-50%);
   width: 80%;
   height: 40%;
-  background: radial-gradient(ellipse, rgba(196, 165, 116, 0.12) 0%, transparent 70%);
+  background: radial-gradient(ellipse, color-mix(in srgb, var(--caramel) 12%, transparent) 0%, transparent 70%);
   pointer-events: none;
 }
 
@@ -66,7 +66,7 @@
 }
 
 .login-hero > p {
-  color: rgba(245, 230, 211, 0.65);
+  color: color-mix(in srgb, var(--cream) 65%, transparent);
   font-size: 1.05rem;
   position: relative;
   font-weight: 400;
@@ -75,10 +75,10 @@
 .login-hero-tagline {
   margin-top: 2.75rem;
   padding: 0.7rem 1.35rem;
-  border: 1px solid rgba(245, 230, 211, 0.12);
+  border: 1px solid color-mix(in srgb, var(--cream) 12%, transparent);
   border-radius: 999px;
   font-size: 0.78rem;
-  color: rgba(245, 230, 211, 0.5);
+  color: color-mix(in srgb, var(--cream) 50%, transparent);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   position: relative;
@@ -94,8 +94,8 @@
   overflow-y: auto;
   min-height: 0;
   background:
-    radial-gradient(ellipse at 85% 15%, rgba(196, 165, 116, 0.1) 0%, transparent 50%),
-    radial-gradient(ellipse at 10% 90%, rgba(93, 64, 55, 0.05) 0%, transparent 50%),
+    radial-gradient(ellipse at 85% 15%, color-mix(in srgb, var(--caramel) 10%, transparent) 0%, transparent 50%),
+    radial-gradient(ellipse at 10% 90%, color-mix(in srgb, var(--coffee) 5%, transparent) 0%, transparent 50%),
     var(--foam);
 }
 
@@ -213,10 +213,10 @@
 
 .btn-login-alt {
   width: 100%;
-  background: linear-gradient(180deg, #5d4037 0%, #3d2618 100%);
+  background: linear-gradient(180deg, var(--coffee) 0%, var(--espresso-deep) 100%);
   color: var(--cream);
   border: none;
-  box-shadow: 0 2px 8px rgba(44, 24, 16, 0.22);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--espresso) 22%, transparent);
   font-size: 0.95rem;
   font-weight: 700;
   padding: 0.85rem 1.25rem;
@@ -224,15 +224,15 @@
 }
 
 .btn-login-alt:hover {
-  background: linear-gradient(180deg, #6b4b40 0%, #4a3222 100%);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--coffee) 88%, white) 0%, color-mix(in srgb, var(--espresso) 78%, black) 100%);
   color: var(--cream);
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(44, 24, 16, 0.28);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--espresso) 28%, transparent);
 }
 
 .btn-login-alt:active {
   transform: translateY(0);
-  box-shadow: 0 1px 4px rgba(44, 24, 16, 0.2);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--espresso) 20%, transparent);
 }
 
 .pin-pad {
@@ -243,7 +243,7 @@
 
 .pin-pad-header {
   padding: 0.85rem 1.25rem;
-  background: linear-gradient(180deg, #5a4036 0%, var(--espresso) 100%);
+  background: linear-gradient(180deg, var(--coffee) 0%, var(--espresso) 100%);
   color: var(--cream);
   font-size: 0.95rem;
   font-weight: 600;
@@ -256,7 +256,7 @@
   align-items: stretch;
   gap: 0.55rem;
   padding: 1rem 1rem 0.85rem;
-  background: linear-gradient(180deg, #f7f1ea 0%, #efe6dc 100%);
+  background: linear-gradient(180deg, var(--foam) 0%, var(--latte) 100%);
   border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -271,7 +271,7 @@
   background: white;
   border: 1.5px solid var(--border);
   border-radius: 8px;
-  box-shadow: inset 0 1px 2px rgba(44, 24, 16, 0.06);
+  box-shadow: inset 0 1px 2px color-mix(in srgb, var(--espresso) 6%, transparent);
 }
 
 .pin-placeholder {
@@ -287,7 +287,7 @@
   height: 0.72rem;
   border-radius: 50%;
   background: var(--espresso);
-  box-shadow: 0 1px 2px rgba(44, 24, 16, 0.25);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--espresso) 25%, transparent);
 }
 
 .pin-backspace {
@@ -322,19 +322,19 @@
   grid-template-columns: repeat(3, 1fr);
   gap: 0.5rem;
   padding: 0.75rem 1rem 0.9rem;
-  background: linear-gradient(180deg, #f3ebe3 0%, #e8ddd2 100%);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--caramel) 18%, white) 0%, color-mix(in srgb, var(--caramel) 28%, #e0d4c8) 100%);
 }
 
 .pin-key {
   appearance: none;
-  border: 1px solid rgba(93, 64, 55, 0.18);
+  border: 1px solid color-mix(in srgb, var(--coffee) 18%, transparent);
   border-radius: 10px;
   min-height: 3.7rem;
   padding: 0.5rem 0.35rem;
-  background: linear-gradient(180deg, #fffefb 0%, #f0e7de 100%);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--caramel) 4%, white) 0%, color-mix(in srgb, var(--caramel) 16%, white) 100%);
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.85) inset,
-    0 2px 6px rgba(44, 24, 16, 0.08);
+    0 2px 6px color-mix(in srgb, var(--espresso) 8%, transparent);
   color: var(--espresso);
   font-family: var(--font-display);
   font-size: 1.65rem;
@@ -358,7 +358,7 @@
   transform: translateY(1px) scale(0.98);
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.6) inset,
-    0 1px 2px rgba(44, 24, 16, 0.12);
+    0 1px 2px color-mix(in srgb, var(--espresso) 12%, transparent);
 }
 
 .pin-key-cancel,
@@ -408,7 +408,7 @@
 
 .login-form-header {
   padding: 0.85rem 1.25rem;
-  background: linear-gradient(180deg, #5a4036 0%, var(--espresso) 100%);
+  background: linear-gradient(180deg, var(--coffee) 0%, var(--espresso) 100%);
   color: var(--cream);
   font-size: 0.95rem;
   font-weight: 600;
@@ -418,7 +418,7 @@
 
 .login-form-body {
   padding: 1.75rem 1.75rem 1.5rem;
-  background: linear-gradient(180deg, #faf6f1 0%, white 40%);
+  background: linear-gradient(180deg, var(--foam) 0%, white 40%);
 }
 
 .login-form-password .login-subtitle {

@@ -54,7 +54,7 @@
 }
 
 .stat-card.revenue .stat-icon { background: linear-gradient(135deg, #eef5f0, #f5faf6); color: var(--mint); }
-.stat-card.stock .stat-icon { background: linear-gradient(135deg, #f3ebe6, #faf6f3); color: var(--coffee); }
+.stat-card.stock .stat-icon { background: linear-gradient(135deg, color-mix(in srgb, var(--caramel) 16%, white), color-mix(in srgb, var(--caramel) 8%, white)); color: var(--coffee); }
 .stat-card.alert .stat-icon { background: linear-gradient(135deg, var(--danger-light), #fff5f3); color: var(--danger); }
 .stat-card.sales .stat-icon { background: linear-gradient(135deg, var(--warning-light), #fff9ee); color: #8a6010; }
 
@@ -146,11 +146,11 @@
 
 .stat-card-featured .stat-delta-flat {
   background: rgba(255, 255, 255, 0.1);
-  color: rgba(245, 230, 211, 0.55);
+  color: color-mix(in srgb, var(--cream) 55%, transparent);
 }
 
 .stat-card-featured .stat-compare-label {
-  color: rgba(245, 230, 211, 0.5);
+  color: color-mix(in srgb, var(--cream) 50%, transparent);
 }
 
 /* Skeleton icon placeholder */

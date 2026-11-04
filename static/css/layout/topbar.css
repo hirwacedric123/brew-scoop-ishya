@@ -129,10 +129,10 @@
 }
 
 .quick-action.primary {
-  background: linear-gradient(135deg, var(--coffee), var(--espresso-light));
+  background: linear-gradient(135deg, var(--coffee), var(--espresso));
   color: var(--cream);
   border-color: transparent;
-  box-shadow: 0 4px 14px rgba(44, 24, 16, 0.22);
+  box-shadow: var(--shadow-primary);
 }
 
 .quick-action.primary svg {

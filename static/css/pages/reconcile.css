@@ -74,7 +74,7 @@
   padding: 1.5rem 1.65rem;
   border-radius: calc(var(--radius) + 2px);
   border: 1px solid var(--border-subtle);
-  background: linear-gradient(145deg, #fff 0%, var(--foam) 55%, #f5ebe3 100%);
+  background: linear-gradient(145deg, #fff 0%, var(--foam) 55%, color-mix(in srgb, var(--caramel) 18%, white) 100%);
   box-shadow: var(--shadow-md);
   overflow: hidden;
 }
@@ -83,7 +83,7 @@
   position: absolute;
   inset: 0;
   opacity: 0.35;
-  background-image: radial-gradient(circle at 1px 1px, rgba(196, 165, 116, 0.22) 1px, transparent 0);
+  background-image: radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--caramel) 22%, transparent) 1px, transparent 0);
   background-size: 18px 18px;
   pointer-events: none;
 }
@@ -95,7 +95,7 @@
   width: 280px;
   height: 280px;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(196, 165, 116, 0.2) 0%, transparent 68%);
+  background: radial-gradient(circle, color-mix(in srgb, var(--caramel) 20%, transparent) 0%, transparent 68%);
   pointer-events: none;
 }
 
@@ -117,7 +117,7 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  background: linear-gradient(145deg, #fff, #f3ebe6);
+  background: linear-gradient(145deg, #fff, color-mix(in srgb, var(--caramel) 16%, white));
   color: var(--coffee);
   box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.9);
   border: 1px solid rgba(232, 221, 208, 0.8);
@@ -215,7 +215,7 @@
   justify-content: center;
   gap: 0.55rem;
   min-width: 11rem;
-  box-shadow: 0 4px 14px rgba(44, 24, 16, 0.18);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--espresso) 18%, transparent);
 }
 
 .shift-hero-cta svg {
@@ -319,7 +319,7 @@
 .shift-joinable-card {
   padding: 0.85rem 1rem;
   border-radius: var(--radius-md, 10px);
-  border: 1px solid rgba(93, 64, 55, 0.18);
+  border: 1px solid color-mix(in srgb, var(--coffee) 18%, transparent);
   background: rgba(255, 255, 255, 0.7);
 }
 
@@ -350,7 +350,7 @@
 .shift-link-cta-primary {
   color: var(--cream);
   white-space: nowrap;
-  box-shadow: 0 4px 14px rgba(44, 24, 16, 0.18);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--espresso) 18%, transparent);
 }
 
 .shift-link-cta-primary:hover {
@@ -366,7 +366,7 @@
 
 .shift-link-cta:hover {
   color: var(--espresso);
-  background: rgba(93, 64, 55, 0.06);
+  background: color-mix(in srgb, var(--coffee) 6%, transparent);
 }
 
 .shift-back-link {
@@ -544,7 +544,7 @@
   border-color: var(--coffee);
   background: linear-gradient(145deg, var(--espresso), var(--coffee));
   color: var(--cream);
-  box-shadow: 0 4px 14px rgba(44, 24, 16, 0.22);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--espresso) 22%, transparent);
   transform: scale(1.06);
 }
 
@@ -636,7 +636,7 @@
 }
 
 .shift-panel-icon-start {
-  background: linear-gradient(135deg, #f3ebe6, #faf6f3);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--caramel) 16%, white), color-mix(in srgb, var(--caramel) 8%, white));
   color: var(--coffee);
 }
 
@@ -773,7 +773,7 @@
   padding: 1rem 1.15rem;
   border-radius: var(--radius-sm);
   background: linear-gradient(135deg, #f0f4ff, #e8eeff);
-  border: 1px solid rgba(93, 64, 55, 0.12);
+  border: 1px solid color-mix(in srgb, var(--coffee) 12%, transparent);
   margin-bottom: 0.25rem;
 }
 
@@ -815,7 +815,7 @@
 
 .shift-cash-input:focus-within {
   border-color: var(--caramel);
-  box-shadow: 0 0 0 4px rgba(196, 165, 116, 0.18);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--caramel) 18%, transparent);
 }
 
 .shift-cash-prefix {
@@ -913,7 +913,7 @@
 
 .shift-cta-close {
   background: linear-gradient(135deg, var(--espresso) 0%, var(--coffee) 100%);
-  box-shadow: 0 4px 14px rgba(44, 24, 16, 0.2);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--espresso) 20%, transparent);
 }
 
 /* ── Result summary ──────────────────────────────────────────────────────── */
@@ -1475,9 +1475,9 @@
   margin: 0 auto;
   padding: 0.75rem 0.85rem;
   border-radius: calc(var(--radius) + 2px);
-  border: 1px solid rgba(93, 64, 55, 0.16);
+  border: 1px solid color-mix(in srgb, var(--coffee) 16%, transparent);
   background: white;
-  box-shadow: 0 -8px 28px rgba(44, 24, 16, 0.12), var(--shadow-md);
+  box-shadow: 0 -8px 28px color-mix(in srgb, var(--espresso) 12%, transparent), var(--shadow-md);
 }
 
 .shift-close-dock-meta {

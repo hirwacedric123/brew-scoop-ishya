@@ -12,9 +12,9 @@
 }
 
 .badge-category {
-  background: linear-gradient(135deg, var(--latte), rgba(232, 213, 183, 0.6));
+  background: linear-gradient(135deg, var(--latte), color-mix(in srgb, var(--caramel-light) 60%, transparent));
   color: var(--coffee);
-  border-color: rgba(196, 165, 116, 0.25);
+  border-color: color-mix(in srgb, var(--caramel) 25%, transparent);
 }
 
 .badge-stock {
@@ -53,7 +53,7 @@
 }
 
 .badge-adjustment {
-  background: linear-gradient(135deg, var(--latte), rgba(232, 213, 183, 0.5));
+  background: linear-gradient(135deg, var(--latte), color-mix(in srgb, var(--caramel-light) 50%, transparent));
   color: var(--coffee);
-  border-color: rgba(196, 165, 116, 0.2);
+  border-color: color-mix(in srgb, var(--caramel) 20%, transparent);
 }

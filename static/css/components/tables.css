@@ -11,7 +11,7 @@
 }
 
 .table-premium .data-table th {
-  background: linear-gradient(to bottom, white, rgba(250, 246, 241, 0.8));
+  background: linear-gradient(to bottom, white, color-mix(in srgb, var(--foam) 80%, transparent));
   font-size: 0.68rem;
   letter-spacing: 0.09em;
 }
@@ -38,7 +38,7 @@
   text-transform: uppercase;
   letter-spacing: 0.07em;
   color: var(--text-muted);
-  background: rgba(250, 246, 241, 0.6);
+  background: color-mix(in srgb, var(--foam) 60%, transparent);
   border-bottom: 1px solid var(--border-subtle);
   font-weight: 600;
   white-space: nowrap;
@@ -60,11 +60,11 @@
 }
 
 .data-table tbody tr:nth-child(even) {
-  background: rgba(250, 246, 241, 0.45);
+  background: color-mix(in srgb, var(--foam) 45%, transparent);
 }
 
 .data-table tbody tr:hover {
-  background: rgba(245, 230, 211, 0.35);
+  background: color-mix(in srgb, var(--cream) 35%, transparent);
 }
 
 .product-cell {

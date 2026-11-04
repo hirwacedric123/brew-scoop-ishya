@@ -38,7 +38,7 @@
 }
 
 #view-sell .card-header {
-  background: linear-gradient(to bottom, white, rgba(250, 246, 241, 0.55));
+  background: linear-gradient(to bottom, white, color-mix(in srgb, var(--foam) 55%, transparent));
 }
 
 /* ── Shift banner ────────────────────────────────────────────────────────── */
@@ -102,9 +102,9 @@
   gap: 1rem;
   margin-bottom: 1.35rem;
   padding: 0.95rem 1.35rem;
-  background: linear-gradient(135deg, var(--espresso) 0%, #1f0f08 100%);
+  background: linear-gradient(135deg, var(--espresso) 0%, var(--espresso-deep) 100%);
   border-radius: var(--radius);
-  box-shadow: 0 4px 20px rgba(44, 24, 16, 0.2);
+  box-shadow: 0 4px 20px color-mix(in srgb, var(--espresso) 20%, transparent);
   position: relative;
   overflow: hidden;
 }
@@ -126,7 +126,7 @@
   display: block;
   font-size: 0.7rem;
   font-weight: 600;
-  color: rgba(245, 230, 211, 0.6);
+  color: color-mix(in srgb, var(--cream) 60%, transparent);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   margin-bottom: 0.35rem;
@@ -137,7 +137,7 @@
   padding: 0.8rem 1rem;
   font-size: 1rem;
   font-weight: 600;
-  border: 1.5px solid rgba(196, 165, 116, 0.4);
+  border: 1.5px solid color-mix(in srgb, var(--caramel) 40%, transparent);
   border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.08);
   font-family: var(--font-body);
@@ -146,14 +146,14 @@
 }
 
 .pos-barcode-wrap input::placeholder {
-  color: rgba(245, 230, 211, 0.35);
+  color: color-mix(in srgb, var(--cream) 35%, transparent);
 }
 
 .pos-barcode-wrap input:focus {
   outline: none;
   border-color: var(--caramel);
   background: rgba(255, 255, 255, 0.13);
-  box-shadow: 0 0 0 3px rgba(196, 165, 116, 0.18);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--caramel) 18%, transparent);
 }
 
 .pos-shortcuts {
@@ -161,7 +161,7 @@
   flex-wrap: wrap;
   gap: 0.65rem 1.35rem;
   font-size: 0.79rem;
-  color: rgba(245, 230, 211, 0.65);
+  color: color-mix(in srgb, var(--cream) 65%, transparent);
 }
 
 .pos-shortcuts kbd {
@@ -267,7 +267,7 @@
   outline: none;
   border-color: var(--caramel);
   background: white;
-  box-shadow: 0 0 0 3px rgba(196, 165, 116, 0.14);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--caramel) 14%, transparent);
 }
 
 .sell-search-wrap input::placeholder {
@@ -429,7 +429,7 @@
   border-radius: 999px;
   background: linear-gradient(135deg, var(--coffee), var(--espresso));
   color: var(--cream);
-  box-shadow: 0 2px 8px rgba(44, 24, 16, 0.2);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--espresso) 20%, transparent);
 }
 
 .sell-category-card-arrow {
@@ -510,7 +510,7 @@
   background: linear-gradient(135deg, var(--coffee), var(--espresso-light));
   color: var(--cream);
   border-color: transparent;
-  box-shadow: 0 2px 10px rgba(44, 24, 16, 0.2);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--espresso) 20%, transparent);
 }
 
 .sell-category-tab-count {
@@ -583,7 +583,7 @@
 
 .quick-pick-item.in-cart {
   border-color: var(--caramel);
-  box-shadow: 0 0 0 1px rgba(196, 165, 116, 0.28), var(--shadow-hover);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--caramel) 28%, transparent), var(--shadow-hover);
   background: linear-gradient(180deg, white 60%, color-mix(in srgb, var(--caramel) 5%, white));
 }
 
@@ -676,7 +676,7 @@
   color: var(--cream);
   background: linear-gradient(135deg, var(--coffee), var(--espresso));
   border-radius: 999px;
-  box-shadow: 0 2px 6px rgba(44, 24, 16, 0.18);
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--espresso) 18%, transparent);
   flex-shrink: 0;
 }
 
@@ -715,7 +715,7 @@
 .cart-footer {
   padding: 1.1rem 1.4rem 1.4rem;
   border-top: 1px solid var(--border-subtle);
-  background: linear-gradient(to top, rgba(250, 246, 241, 0.4), transparent);
+  background: linear-gradient(to top, color-mix(in srgb, var(--foam) 40%, transparent), transparent);
 }
 
 /* ── Cart items ──────────────────────────────────────────────────────────── */
@@ -802,7 +802,7 @@
   padding: 1.15rem 1.35rem;
   border-radius: var(--radius-sm);
   margin-bottom: 1.2rem;
-  box-shadow: 0 4px 20px rgba(44, 24, 16, 0.22);
+  box-shadow: 0 4px 20px color-mix(in srgb, var(--espresso) 22%, transparent);
   position: relative;
   overflow: hidden;
 }
@@ -867,7 +867,7 @@
   background: linear-gradient(135deg, var(--coffee) 0%, var(--espresso) 100%);
   border-color: transparent;
   color: var(--cream);
-  box-shadow: 0 3px 10px rgba(44, 24, 16, 0.22);
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--espresso) 22%, transparent);
   transform: translateY(-1px);
 }
 

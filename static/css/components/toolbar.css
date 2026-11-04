@@ -55,7 +55,7 @@
   background: linear-gradient(135deg, var(--espresso), var(--espresso-light));
   border-color: transparent;
   color: var(--cream);
-  box-shadow: 0 2px 8px rgba(44, 24, 16, 0.2);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--espresso) 20%, transparent);
 }
 
 .search-box {
@@ -75,7 +75,7 @@
 
 .search-box:focus-within {
   border-color: var(--caramel);
-  box-shadow: 0 0 0 3px rgba(196, 165, 116, 0.15);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--caramel) 15%, transparent);
 }
 
 .search-box svg {

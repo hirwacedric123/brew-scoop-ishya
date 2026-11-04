@@ -81,7 +81,7 @@ select:hover {
 .form-group textarea:focus {
   outline: none;
   border-color: var(--caramel);
-  box-shadow: 0 0 0 3px rgba(196, 165, 116, 0.18);
+  box-shadow: 0 0 0 3px var(--accent-ring);
   background: white;
 }
 

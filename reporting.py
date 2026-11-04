@@ -256,6 +256,7 @@ def low_stock_items(db, limit=8, business_id=None):
             "SELECT quantity, reorder_level FROM cup_inventory LIMIT 1"
         ).fetchone()
         products = db.execute("SELECT * FROM products").fetchall()
+        ingredients = db.execute("SELECT * FROM ingredients").fetchall()
     else:
         cats = db.execute(
             "SELECT name, uses_cup_stock FROM categories WHERE business_id = ?",
@@ -268,6 +269,9 @@ def low_stock_items(db, limit=8, business_id=None):
         products = db.execute(
             "SELECT * FROM products WHERE business_id = ?", (business_id,)
         ).fetchall()
+        ingredients = db.execute(
+            "SELECT * FROM ingredients WHERE business_id = ?", (business_id,)
+        ).fetchall()
     category_cup_map = {
         row["name"]: bool(row["uses_cup_stock"]) for row in cats
     }
@@ -275,6 +279,10 @@ def low_stock_items(db, limit=8, business_id=None):
 
     for row in products:
         if category_cup_map.get(row["category"], False):
+            continue
+        # Recipe products don't hold finished stock; their availability is ingredient-based.
+        keys = row.keys() if hasattr(row, "keys") else []
+        if "uses_recipe" in keys and row["uses_recipe"]:
             continue
         qty = row["quantity"]
         reorder = row["reorder_level"]
@@ -286,6 +294,20 @@ def low_stock_items(db, limit=8, business_id=None):
                     "quantity": qty,
                     "reorder_level": reorder,
                     "status": status,
+                }
+            )
+
+    for row in ingredients:
+        qty = float(row["quantity"] or 0)
+        reorder = float(row["reorder_level"] or 0)
+        if qty <= reorder:
+            unit = row["unit"] or ""
+            items.append(
+                {
+                    "name": f"{row['name']} ({unit})" if unit else row["name"],
+                    "quantity": round(qty, 4),
+                    "reorder_level": round(reorder, 4),
+                    "status": "out" if qty <= 0 else "low",
                 }
             )
 

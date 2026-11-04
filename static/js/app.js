@@ -454,8 +454,45 @@ function productCell(name, sub) {
   </div>`;
 }
 
+function resolveCssColor(cssValue, fallback = "#012100") {
+  if (!cssValue || typeof document === "undefined" || !document.body) return fallback;
+  const probe = document.createElement("span");
+  probe.style.cssText = `position:absolute;left:-9999px;visibility:hidden;color:${cssValue}`;
+  document.body.appendChild(probe);
+  const resolved = getComputedStyle(probe).color;
+  probe.remove();
+  if (!resolved || resolved === "rgba(0, 0, 0, 0)" || resolved === "transparent") return fallback;
+  return resolved;
+}
+
+function brandColor(token, alpha) {
+  const base = resolveCssColor(`var(${token})`);
+  if (alpha == null || alpha >= 1) return base;
+  const m = base.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+  if (!m) return base;
+  return `rgba(${m[1]}, ${m[2]}, ${m[3]}, ${alpha})`;
+}
+
+function chartTooltipTheme() {
+  return {
+    backgroundColor: brandColor("--espresso", 0.92),
+    titleColor: brandColor("--cream", 0.7),
+    bodyColor: brandColor("--cream"),
+    padding: 10,
+    cornerRadius: 8,
+  };
+}
+
 function categoryAccent(name) {
-  const palette = ["#efd196", "#6b8f71", "#164816", "#d4a03c", "#012100", "#7a9e7e", "#c4a574"];
+  const palette = [
+    "var(--caramel)",
+    "var(--mint)",
+    "var(--coffee)",
+    "var(--amber)",
+    "var(--espresso)",
+    "var(--mint-light)",
+    "var(--caramel-light)",
+  ];
   let hash = 0;
   for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
   return palette[Math.abs(hash) % palette.length];
@@ -1158,20 +1195,9 @@ function applyBusinessBranding(business) {
   const logo = biz.logo_url || DEFAULT_BRANDING.logo_url;
 
   const root = document.documentElement;
+  // Soft surfaces, text, shadows, and scales derive from these in variables.css
   root.style.setProperty("--espresso", primary);
-  root.style.setProperty(
-    "--espresso-light",
-    `color-mix(in srgb, ${primary} 82%, white)`
-  );
-  root.style.setProperty(
-    "--coffee",
-    `color-mix(in srgb, ${primary} 72%, white)`
-  );
   root.style.setProperty("--caramel", accent);
-  root.style.setProperty(
-    "--caramel-light",
-    `color-mix(in srgb, ${accent} 78%, white)`
-  );
   root.style.setProperty("--brand-primary", primary);
   root.style.setProperty("--brand-accent", accent);
 
@@ -1890,8 +1916,10 @@ function renderRevenueChart(dailyData, todayDate) {
   const units = dailyData.map((d) => d.units);
   const isToday = dailyData.map((d) => d.date === todayDate);
 
-  const bgColors = isToday.map((t) => (t ? "#efd196" : "rgba(239,209,150,0.32)"));
-  const borderColors = isToday.map((t) => (t ? "#b08040" : "rgba(196,165,116,0.55)"));
+  const bgColors = isToday.map((t) => (t ? brandColor("--caramel") : brandColor("--caramel", 0.32)));
+  const borderColors = isToday.map((t) =>
+    t ? brandColor("--amber") : brandColor("--caramel", 0.55)
+  );
 
   state.charts.revenue7d = new Chart(canvas, {
     type: "bar",
@@ -1912,10 +1940,10 @@ function renderRevenueChart(dailyData, todayDate) {
           label: "Units",
           data: units,
           type: "line",
-          borderColor: "rgba(107,143,113,0.7)",
-          backgroundColor: "rgba(107,143,113,0.08)",
+          borderColor: brandColor("--mint", 0.7),
+          backgroundColor: brandColor("--mint", 0.08),
           borderWidth: 2,
-          pointBackgroundColor: "rgba(107,143,113,0.9)",
+          pointBackgroundColor: brandColor("--mint", 0.9),
           pointRadius: 3.5,
           pointHoverRadius: 5,
           fill: true,
@@ -1941,15 +1969,11 @@ function renderRevenueChart(dailyData, todayDate) {
             useBorderRadius: true,
             padding: 12,
             font: { size: 11, family: "'Plus Jakarta Sans', system-ui" },
-            color: "#7a6a5e",
+            color: brandColor("--text-muted"),
           },
         },
         tooltip: {
-          backgroundColor: "rgba(44,24,16,0.92)",
-          titleColor: "rgba(245,230,211,0.7)",
-          bodyColor: "#f5e6d3",
-          padding: 10,
-          cornerRadius: 8,
+          ...chartTooltipTheme(),
           callbacks: {
             title: (items) => items[0].label,
             label: (ctx) =>
@@ -1965,17 +1989,17 @@ function renderRevenueChart(dailyData, todayDate) {
           border: { display: false },
           ticks: {
             font: { size: 11, family: "'Plus Jakarta Sans', system-ui" },
-            color: "#7a6a5e",
+            color: brandColor("--text-muted"),
             maxRotation: 0,
           },
         },
         y: {
           position: "left",
-          grid: { color: "rgba(232,221,208,0.45)", drawTicks: false },
+          grid: { color: brandColor("--border", 0.45), drawTicks: false },
           border: { display: false },
           ticks: {
             font: { size: 11, family: "'Plus Jakarta Sans', system-ui" },
-            color: "#7a6a5e",
+            color: brandColor("--text-muted"),
             padding: 6,
             callback: (v) => fmt.format(v),
           },
@@ -1986,7 +2010,7 @@ function renderRevenueChart(dailyData, todayDate) {
           border: { display: false },
           ticks: {
             font: { size: 11, family: "'Plus Jakarta Sans', system-ui" },
-            color: "rgba(107,143,113,0.75)",
+            color: brandColor("--mint", 0.75),
             padding: 6,
           },
         },
@@ -2009,7 +2033,7 @@ function renderCategoryDonutChart(categories) {
   const labels = categories.map((c) => c.name);
   const data = categories.map((c) => c.revenue);
   const total = data.reduce((s, v) => s + v, 0);
-  const colors = labels.map((n) => categoryAccent(n));
+  const colors = labels.map((n) => resolveCssColor(categoryAccent(n)));
 
   state.charts.categoryDonut = new Chart(canvas, {
     type: "doughnut",
@@ -2032,11 +2056,7 @@ function renderCategoryDonutChart(categories) {
       plugins: {
         legend: { display: false },
         tooltip: {
-          backgroundColor: "rgba(44,24,16,0.92)",
-          titleColor: "rgba(245,230,211,0.7)",
-          bodyColor: "#f5e6d3",
-          padding: 10,
-          cornerRadius: 8,
+          ...chartTooltipTheme(),
           callbacks: {
             label: (ctx) => {
               const pct = total > 0 ? ((ctx.parsed / total) * 100).toFixed(1) : 0;
@@ -3654,6 +3674,15 @@ function printInvoice() {
     logo.setAttribute("src", new URL(logoSrc, window.location.origin).href);
   }
 
+  const printPrimary = brandColor("--espresso");
+  const printAccent = brandColor("--caramel");
+  const printFoam = brandColor("--foam");
+  const printCream = brandColor("--cream");
+  const printCoffee = brandColor("--coffee");
+  const printMuted = brandColor("--text-muted");
+  const printBorder = brandColor("--border");
+  const printSubtle = brandColor("--text-subtle");
+
   const root = document.createElement("div");
   root.id = "invoice-print-root";
   root.innerHTML = `
@@ -3679,13 +3708,13 @@ function printInvoice() {
           width: 100%;
           max-width: 118mm;
           margin: 0 auto;
-          color: #012100;
+          color: ${printPrimary};
           font-family: "Plus Jakarta Sans", system-ui, sans-serif;
           font-size: 10pt;
           line-height: 1.35;
         }
         #invoice-print-root .invoice {
-          border: 1px solid #e0d5c8;
+          border: 1px solid ${printBorder};
           border-radius: 6px;
           overflow: hidden;
         }
@@ -3697,8 +3726,8 @@ function printInvoice() {
           gap: 6px;
           margin: 0;
           padding: 12px 12px 10px;
-          background: #faf6f1;
-          border-bottom: 1px solid #e8ddd0;
+          background: ${printFoam};
+          border-bottom: 1px solid ${printBorder};
           -webkit-print-color-adjust: exact;
           print-color-adjust: exact;
         }
@@ -3714,14 +3743,14 @@ function printInvoice() {
           font-family: Fraunces, Georgia, serif;
           font-size: 13pt;
           font-weight: 600;
-          color: #012100;
+          color: ${printPrimary};
         }
         #invoice-print-root .invoice-brand-text p {
           margin: 2px 0 0;
           font-size: 7.5pt;
           text-transform: uppercase;
           letter-spacing: 0.08em;
-          color: #7a6a5e;
+          color: ${printMuted};
           font-weight: 600;
         }
         #invoice-print-root .invoice-body {
@@ -3733,8 +3762,8 @@ function printInvoice() {
           gap: 6px 10px;
           margin: 0 0 10px;
           padding: 7px 8px;
-          background: #faf6f1;
-          border: 1px solid #e8ddd0;
+          background: ${printFoam};
+          border: 1px solid ${printBorder};
           border-radius: 4px;
           -webkit-print-color-adjust: exact;
           print-color-adjust: exact;
@@ -3744,7 +3773,7 @@ function printInvoice() {
           font-size: 7pt;
           text-transform: uppercase;
           letter-spacing: 0.05em;
-          color: #7a6a5e;
+          color: ${printMuted};
           font-weight: 600;
         }
         #invoice-print-root .invoice-meta dd {
@@ -3774,13 +3803,13 @@ function printInvoice() {
           font-size: 7pt;
           text-transform: uppercase;
           letter-spacing: 0.05em;
-          color: #7a6a5e;
+          color: ${printMuted};
           padding: 3px 2px;
-          border-bottom: 1.5px solid #e8ddd0;
+          border-bottom: 1.5px solid ${printBorder};
         }
         #invoice-print-root .invoice-table td {
           padding: 5px 2px;
-          border-bottom: 1px solid #f0e8dc;
+          border-bottom: 1px solid ${printCream};
           vertical-align: top;
         }
         #invoice-print-root .invoice-table tbody tr:last-child td {
@@ -3795,11 +3824,11 @@ function printInvoice() {
           display: block;
           font-size: 7.5pt;
           font-weight: 500;
-          color: #7a6a5e;
+          color: ${printMuted};
         }
         #invoice-print-root .invoice-totals {
-          background: #f5e6d3;
-          border: 1px solid #e8ddd0;
+          background: ${printCream};
+          border: 1px solid ${printBorder};
           border-radius: 4px;
           padding: 7px 9px;
           margin: 0 0 8px;
@@ -3812,34 +3841,34 @@ function printInvoice() {
           gap: 8px;
           font-size: 9pt;
           padding: 1px 0;
-          color: #5d4037;
+          color: ${printCoffee};
         }
         #invoice-print-root .invoice-totals-row.grand {
           margin-top: 4px;
           padding-top: 5px;
-          border-top: 1.5px solid #efd196;
+          border-top: 1.5px solid ${printAccent};
           font-family: Fraunces, Georgia, serif;
           font-size: 12pt;
           font-weight: 600;
-          color: #012100;
+          color: ${printPrimary};
         }
         #invoice-print-root .invoice-notes {
           margin: 0 0 8px;
           padding: 5px 7px;
-          border-left: 3px solid #efd196;
-          background: #faf6f1;
+          border-left: 3px solid ${printAccent};
+          background: ${printFoam};
           font-size: 8pt;
-          color: #5d4037;
+          color: ${printCoffee};
           -webkit-print-color-adjust: exact;
           print-color-adjust: exact;
         }
         #invoice-print-root .invoice-footer {
           margin: 0;
           padding-top: 7px;
-          border-top: 1px dashed #e8ddd0;
+          border-top: 1px dashed ${printBorder};
           text-align: center;
           font-size: 8pt;
-          color: #a89888;
+          color: ${printSubtle};
         }
       }
     </style>
@@ -5703,10 +5732,10 @@ function renderSalesTrendChart(dailyBreakdown, selectedDate) {
   const units = dailyBreakdown.map((d) => d.units);
 
   const bgColors = dailyBreakdown.map((d) =>
-    d.date === selectedDate ? "#5d4037" : "rgba(196,165,116,0.42)"
+    d.date === selectedDate ? brandColor("--coffee") : brandColor("--caramel", 0.42)
   );
   const borderColors = dailyBreakdown.map((d) =>
-    d.date === selectedDate ? "#3d2618" : "rgba(196,165,116,0.65)"
+    d.date === selectedDate ? brandColor("--espresso-deep") : brandColor("--caramel", 0.65)
   );
 
   state.charts.salesTrend = new Chart(canvas, {
@@ -5728,10 +5757,10 @@ function renderSalesTrendChart(dailyBreakdown, selectedDate) {
           label: "Units",
           data: units,
           type: "line",
-          borderColor: "rgba(107,143,113,0.65)",
-          backgroundColor: "rgba(107,143,113,0.07)",
+          borderColor: brandColor("--mint", 0.65),
+          backgroundColor: brandColor("--mint", 0.07),
           borderWidth: 1.75,
-          pointBackgroundColor: "rgba(107,143,113,0.85)",
+          pointBackgroundColor: brandColor("--mint", 0.85),
           pointRadius: dailyBreakdown.length > 20 ? 2 : 3,
           pointHoverRadius: 5,
           fill: true,
@@ -5763,15 +5792,11 @@ function renderSalesTrendChart(dailyBreakdown, selectedDate) {
             useBorderRadius: true,
             padding: 12,
             font: { size: 11, family: "'Plus Jakarta Sans', system-ui" },
-            color: "#7a6a5e",
+            color: brandColor("--text-muted"),
           },
         },
         tooltip: {
-          backgroundColor: "rgba(44,24,16,0.92)",
-          titleColor: "rgba(245,230,211,0.7)",
-          bodyColor: "#f5e6d3",
-          padding: 10,
-          cornerRadius: 8,
+          ...chartTooltipTheme(),
           callbacks: {
             title: (items) => items[0].label,
             label: (ctx) =>
@@ -5788,7 +5813,7 @@ function renderSalesTrendChart(dailyBreakdown, selectedDate) {
           border: { display: false },
           ticks: {
             font: { size: 11, family: "'Plus Jakarta Sans', system-ui" },
-            color: "#7a6a5e",
+            color: brandColor("--text-muted"),
             maxRotation: 45,
             autoSkip: true,
             maxTicksLimit: 14,
@@ -5796,11 +5821,11 @@ function renderSalesTrendChart(dailyBreakdown, selectedDate) {
         },
         y: {
           position: "left",
-          grid: { color: "rgba(232,221,208,0.45)", drawTicks: false },
+          grid: { color: brandColor("--border", 0.45), drawTicks: false },
           border: { display: false },
           ticks: {
             font: { size: 11, family: "'Plus Jakarta Sans', system-ui" },
-            color: "#7a6a5e",
+            color: brandColor("--text-muted"),
             padding: 6,
             callback: (v) => fmt.format(v),
           },
@@ -5811,7 +5836,7 @@ function renderSalesTrendChart(dailyBreakdown, selectedDate) {
           border: { display: false },
           ticks: {
             font: { size: 11, family: "'Plus Jakarta Sans', system-ui" },
-            color: "rgba(107,143,113,0.7)",
+            color: brandColor("--mint", 0.7),
             padding: 6,
           },
         },
@@ -5861,10 +5886,7 @@ function renderSalesDonut(canvasId, legendId, items, labelKey, valueKey, colorFn
       plugins: {
         legend: { display: false },
         tooltip: {
-          backgroundColor: "rgba(44,24,16,0.92)",
-          bodyColor: "#f5e6d3",
-          padding: 10,
-          cornerRadius: 8,
+          ...chartTooltipTheme(),
           callbacks: {
             label: (ctx) => {
               const pct = total > 0 ? ((ctx.parsed / total) * 100).toFixed(1) : 0;
@@ -5890,14 +5912,70 @@ function renderSalesDonut(canvasId, legendId, items, labelKey, valueKey, colorFn
   }
 }
 
+function remainingStockQtyLabel(item) {
+  const qty = item?.quantity ?? 0;
+  const unit = item?.unit || "";
+  if (item?.kind === "recipe" || unit === "makeable") {
+    return `${fmtNum.format(qty)} makeable`;
+  }
+  if (item?.kind === "cup" || unit === "cups") {
+    return `${fmtNum.format(qty)} cups`;
+  }
+  if (unit && unit !== "units") {
+    return `${fmtNum.format(qty)} ${unit}`;
+  }
+  return `${fmtNum.format(qty)} left`;
+}
+
+function remainingStockBadgeLabel(item) {
+  if (item?.kind === "recipe" && item.stock_status === "out") {
+    return "Can't make";
+  }
+  return remainingStockQtyLabel(item);
+}
+
+function renderRemainingStockList(el, items, emptyTitle, emptyHint) {
+  if (!el) return;
+  if (!items.length) {
+    el.innerHTML = emptyState(UI_ICONS.box, emptyTitle, emptyHint, true);
+    return;
+  }
+  el.innerHTML = items
+    .map((item) => {
+      const meta =
+        item.kind === "cup"
+          ? "Shared cup pool"
+          : item.kind === "recipe"
+            ? `${esc(item.category || "Recipe")} · from ingredients`
+            : item.kind === "ingredient"
+              ? `Ingredient · ${esc(item.unit || "")}`
+              : esc(item.category || "Product");
+      return `
+      <div class="alert-row">
+        <div class="alert-row-info">
+          <div class="product-avatar product-avatar-sm">${esc(productInitials(item.name))}</div>
+          <div>
+            <strong>${esc(item.name)}</strong>
+            <span>${meta}</span>
+          </div>
+        </div>
+        <span class="badge badge-stock ${esc(item.stock_status || "ok")}">${esc(remainingStockBadgeLabel(item))}</span>
+      </div>`;
+    })
+    .join("");
+}
+
 function renderSalesFifoSection(inventory, from, to) {
   const fifoStats = document.getElementById("sales-fifo-stats");
   const poolsEl = document.getElementById("sales-fifo-pools");
+  const remainingProductsEl = document.getElementById("sales-fifo-remaining-products");
+  const remainingIngredientsEl = document.getElementById("sales-fifo-remaining-ingredients");
   const expiringEl = document.getElementById("sales-fifo-expiring");
   const wasteEl = document.getElementById("sales-fifo-waste");
   const wasteRange = document.getElementById("sales-fifo-waste-range");
   const invLabel = document.getElementById("sales-fifo-inv-label");
   const inv = inventory || {};
+  const remaining = inv.remaining_stock || {};
 
   if (fifoStats) {
     const expCount = inv.expiring_lots_count || 0;
@@ -5910,7 +5988,9 @@ function renderSalesFifoSection(inventory, from, to) {
   }
 
   if (invLabel) {
-    invLabel.textContent = `${fmt.format(inv.inventory_value || 0)} on hand · lot-based`;
+    const productCount = (remaining.products || []).length + (remaining.cups ? 1 : 0);
+    const ingredientCount = (remaining.ingredients || []).length;
+    invLabel.textContent = `${fmtNum.format(productCount)} products · ${fmtNum.format(ingredientCount)} ingredients on hand`;
   }
 
   const byPool = inv.by_pool || {};
@@ -5930,6 +6010,28 @@ function renderSalesFifoSection(inventory, from, to) {
       )
       .join("");
   }
+
+  const productRows = [...(remaining.products || [])];
+  if (remaining.cups) {
+    productRows.unshift({
+      ...remaining.cups,
+      name: remaining.cups.name || "Shared Cups",
+      kind: "cup",
+      unit: "cups",
+    });
+  }
+  renderRemainingStockList(
+    remainingProductsEl,
+    productRows,
+    "No product stock",
+    "Add products or restock finished goods to see remaining quantities."
+  );
+  renderRemainingStockList(
+    remainingIngredientsEl,
+    remaining.ingredients || [],
+    "No ingredients",
+    "Add ingredients to track raw material remaining stock."
+  );
 
   const expiring = inv.expiring_lots || [];
   if (expiringEl) {
@@ -6033,7 +6135,7 @@ function renderSalesReport(report) {
     renderSalesDonut(
       "chart-sales-payment", "sales-payment-legend",
       payment_breakdown, "label", "revenue",
-      (p) => PAYMENT_COLORS[p.method] || "#efd196"
+      (p) => PAYMENT_COLORS[p.method] || brandColor("--caramel")
     );
     renderSalesDonut(
       "chart-sales-cat", "sales-cat-legend",

@@ -170,7 +170,7 @@
 .stat-card-featured {
   grid-column: 1 / -1;
   padding: 1.15rem 1.35rem;
-  box-shadow: 0 8px 32px rgba(44, 24, 16, 0.22);
+  box-shadow: 0 8px 32px color-mix(in srgb, var(--espresso) 22%, transparent);
 }
 
 .stat-card-featured::before {
@@ -191,7 +191,7 @@
 }
 
 .stat-card-featured .stat-label {
-  color: rgba(245, 230, 211, 0.65);
+  color: color-mix(in srgb, var(--cream) 65%, transparent);
   font-size: 0.68rem;
   letter-spacing: 0.06em;
   line-height: 1.2;
@@ -205,7 +205,7 @@
 }
 
 .stat-card-featured .stat-sub {
-  color: rgba(245, 230, 211, 0.55);
+  color: color-mix(in srgb, var(--cream) 55%, transparent);
   font-size: 0.74rem;
   line-height: 1.3;
 }
@@ -218,7 +218,7 @@
   padding: 1rem 1.1rem;
   gap: 0.75rem;
   align-items: flex-start;
-  box-shadow: 0 1px 3px rgba(44, 24, 16, 0.04), 0 4px 16px rgba(44, 24, 16, 0.05);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--espresso) 4%, transparent), 0 4px 16px color-mix(in srgb, var(--espresso) 5%, transparent);
 }
 
 #view-dashboard .stat-card:not(.stat-card-featured) .stat-content {
@@ -270,11 +270,11 @@
 }
 
 #view-dashboard .dashboard-card {
-  box-shadow: 0 1px 3px rgba(44, 24, 16, 0.04), 0 4px 16px rgba(44, 24, 16, 0.05);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--espresso) 4%, transparent), 0 4px 16px color-mix(in srgb, var(--espresso) 5%, transparent);
 }
 
 #view-dashboard .dashboard-card:hover {
-  box-shadow: 0 2px 6px rgba(44, 24, 16, 0.06), 0 8px 24px rgba(44, 24, 16, 0.07);
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--espresso) 6%, transparent), 0 8px 24px color-mix(in srgb, var(--espresso) 7%, transparent);
 }
 
 #view-dashboard .card-header {
@@ -306,7 +306,7 @@
 
 .card-title-icon-warn { background: var(--danger-light); color: var(--danger); }
 .card-title-icon-mint { background: #eef5f0; color: var(--mint); }
-.card-title-icon-coffee { background: #f3ebe6; color: var(--coffee); }
+.card-title-icon-coffee { background: color-mix(in srgb, var(--caramel) 16%, white); color: var(--coffee); }
 .card-title-icon-amber { background: var(--warning-light); color: #8a6010; }
 .card-title-icon-caramel { background: #fdf4e3; color: var(--caramel); }
 
@@ -387,7 +387,7 @@
 }
 
 .alert-row:hover {
-  background: rgba(250, 246, 241, 0.8);
+  background: color-mix(in srgb, var(--foam) 80%, transparent);
 }
 
 .alert-row-info {
@@ -496,7 +496,7 @@
 }
 
 .activity-item:hover {
-  background: rgba(250, 246, 241, 0.8);
+  background: color-mix(in srgb, var(--foam) 80%, transparent);
 }
 
 .activity-dot {

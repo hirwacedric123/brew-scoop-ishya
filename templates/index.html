@@ -18,10 +18,7 @@
   <style id="business-branding-vars">
     :root {
       --espresso: {{ brand_primary }};
-      --espresso-light: color-mix(in srgb, {{ brand_primary }} 82%, white);
-      --coffee: color-mix(in srgb, {{ brand_primary }} 72%, white);
       --caramel: {{ brand_accent }};
-      --caramel-light: color-mix(in srgb, {{ brand_accent }} 78%, white);
       --brand-primary: {{ brand_primary }};
       --brand-accent: {{ brand_accent }};
     }
@@ -1427,6 +1424,16 @@
                 <div class="sales-fifo-pools" id="sales-fifo-pools"></div>
                 <div class="sales-fifo-split">
                   <div>
+                    <h4 class="sales-fifo-subhead">Remaining Products</h4>
+                    <div id="sales-fifo-remaining-products" class="sales-fifo-list"></div>
+                  </div>
+                  <div>
+                    <h4 class="sales-fifo-subhead">Remaining Ingredients</h4>
+                    <div id="sales-fifo-remaining-ingredients" class="sales-fifo-list"></div>
+                  </div>
+                </div>
+                <div class="sales-fifo-split sales-fifo-split-secondary">
+                  <div>
                     <h4 class="sales-fifo-subhead">Expiring Soon</h4>
                     <div id="sales-fifo-expiring" class="sales-fifo-list"></div>
                   </div>
@@ -1606,7 +1613,7 @@
           <div class="branding-layout">
             <form id="branding-colors-form" class="branding-card">
               <h4>Colors</h4>
-              <p class="text-muted branding-card-desc">Primary colors the dashboard, buttons, and accents.</p>
+              <p class="text-muted branding-card-desc">Primary and accent tint the shell, surfaces, buttons, charts, and invoices.</p>
               <div class="branding-color-grid">
                 <label class="branding-color-field" for="branding-primary">
                   <span>Primary</span>

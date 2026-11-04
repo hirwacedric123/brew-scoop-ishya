@@ -63,7 +63,7 @@
     display: block;
     position: fixed;
     inset: 0;
-    background: rgba(44, 24, 16, 0.45);
+    background: color-mix(in srgb, var(--espresso) 45%, transparent);
     z-index: 150;
   }
 
@@ -135,7 +135,7 @@
     backdrop-filter: var(--glass-blur);
     border-top: 1px solid var(--glass-border);
     padding: 0.35rem 0.5rem calc(0.35rem + env(safe-area-inset-bottom));
-    box-shadow: 0 -4px 24px rgba(44, 24, 16, 0.08);
+    box-shadow: 0 -4px 24px color-mix(in srgb, var(--espresso) 8%, transparent);
   }
 
   .bottom-nav-item {

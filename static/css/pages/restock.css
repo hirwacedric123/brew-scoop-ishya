@@ -46,7 +46,7 @@
 }
 
 .restock-card {
-  box-shadow: 0 1px 3px rgba(44, 24, 16, 0.04), 0 4px 16px rgba(44, 24, 16, 0.05);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--espresso) 4%, transparent), 0 4px 16px color-mix(in srgb, var(--espresso) 5%, transparent);
   height: 100%;
 }
 
@@ -212,7 +212,7 @@
 }
 
 .restock-sidebar-card {
-  box-shadow: 0 1px 3px rgba(44, 24, 16, 0.04), 0 4px 16px rgba(44, 24, 16, 0.05);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--espresso) 4%, transparent), 0 4px 16px color-mix(in srgb, var(--espresso) 5%, transparent);
   border-top: 3px solid var(--danger);
 }
 
@@ -237,7 +237,7 @@
 }
 
 .restock-pick-item:hover {
-  background: rgba(250, 246, 241, 0.9);
+  background: color-mix(in srgb, var(--foam) 90%, transparent);
 }
 
 .restock-pick-info {

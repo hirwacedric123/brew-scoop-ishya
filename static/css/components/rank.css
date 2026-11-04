@@ -25,7 +25,7 @@
   font-weight: 700;
   color: var(--coffee);
   flex-shrink: 0;
-  border: 1px solid rgba(196, 165, 116, 0.25);
+  border: 1px solid color-mix(in srgb, var(--caramel) 25%, transparent);
 }
 
 .rank-num.gold { background: linear-gradient(135deg, #f0d78c, #e8c86a); color: #7a5c10; border-color: rgba(122, 92, 16, 0.2); }

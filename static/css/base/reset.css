@@ -32,9 +32,9 @@ body {
 
 body:not(.login-page) {
   background:
-    radial-gradient(ellipse 90% 60% at 100% -10%, rgba(196, 165, 116, 0.1) 0%, transparent 55%),
-    radial-gradient(ellipse 70% 50% at -5% 100%, rgba(93, 64, 55, 0.07) 0%, transparent 50%),
-    radial-gradient(ellipse 50% 40% at 50% 50%, rgba(250, 246, 241, 0.5) 0%, transparent 70%),
+    radial-gradient(ellipse 90% 60% at 100% -10%, color-mix(in srgb, var(--caramel) 22%, transparent) 0%, transparent 55%),
+    radial-gradient(ellipse 70% 50% at -5% 100%, color-mix(in srgb, var(--espresso) 12%, transparent) 0%, transparent 50%),
+    radial-gradient(ellipse 50% 40% at 50% 50%, color-mix(in srgb, var(--foam) 70%, transparent) 0%, transparent 70%),
     var(--foam);
 }
 
@@ -58,7 +58,7 @@ body:not(.login-page) {
 }
 
 ::selection {
-  background: rgba(196, 165, 116, 0.35);
+  background: color-mix(in srgb, var(--caramel) 35%, transparent);
   color: var(--espresso);
 }
 

@@ -1188,6 +1188,84 @@ def _stock_status(quantity, reorder_level):
     return "ok"
 
 
+def _remaining_stock_for_report(db, business_id):
+    """Current on-hand stock for products and ingredients (for sales reports)."""
+    category_cup_map = get_category_cup_map(db, business_id)
+    cup_inventory = get_cup_inventory(db, business_id)
+    products = db.execute(
+        "SELECT * FROM products WHERE business_id = ? ORDER BY name COLLATE NOCASE",
+        (business_id,),
+    ).fetchall()
+    ingredients = db.execute(
+        "SELECT * FROM ingredients WHERE business_id = ? ORDER BY name COLLATE NOCASE",
+        (business_id,),
+    ).fetchall()
+
+    product_items = []
+    for row in products:
+        recipe_rows = None
+        if _product_uses_recipe(row):
+            recipe_rows = _get_recipe_rows(db, row["id"], business_id)
+        product = row_to_product(
+            row,
+            category_cup_map,
+            cup_inventory,
+            include_cost=False,
+            recipe_rows=recipe_rows,
+        )
+        # Cup-stock products share one pool — skip duplicates; cups listed once below.
+        if product["uses_cup_stock"]:
+            continue
+        kind = "recipe" if product["uses_recipe"] else "product"
+        unit = "makeable" if product["uses_recipe"] else "units"
+        product_items.append(
+            {
+                "id": product["id"],
+                "name": product["name"],
+                "category": product["category"],
+                "quantity": product["quantity"],
+                "reorder_level": product["reorder_level"],
+                "stock_status": product["stock_status"],
+                "kind": kind,
+                "unit": unit,
+            }
+        )
+
+    ingredient_items = []
+    for row in ingredients:
+        ing = row_to_ingredient(row, include_cost=False)
+        ingredient_items.append(
+            {
+                "id": ing["id"],
+                "name": ing["name"],
+                "quantity": ing["quantity"],
+                "reorder_level": ing["reorder_level"],
+                "stock_status": ing["stock_status"],
+                "unit": ing["unit"],
+                "kind": "ingredient",
+            }
+        )
+
+    def _stock_sort_key(item):
+        status_rank = {"out": 0, "low": 1, "ok": 2}.get(item["stock_status"], 3)
+        return (status_rank, float(item["quantity"] or 0), item["name"].lower())
+
+    product_items.sort(key=_stock_sort_key)
+    ingredient_items.sort(key=_stock_sort_key)
+
+    cups = None
+    if cup_inventory is not None:
+        cups = row_to_cup_inventory(cup_inventory)
+        cups["kind"] = "cup"
+        cups["unit"] = "cups"
+
+    return {
+        "products": product_items,
+        "ingredients": ingredient_items,
+        "cups": cups,
+    }
+
+
 def row_to_ingredient(row, include_cost=None):
     qty = float(row["quantity"] or 0)
     reorder = float(row["reorder_level"] or 0)
@@ -5707,11 +5785,13 @@ def sales_report():
     )
     snapshot = fifo.inventory_snapshot(db, biz_id, within_days=7)
     waste = fifo.period_waste_writeoffs(db, biz_id, date_from, date_to)
+    remaining = _remaining_stock_for_report(db, biz_id)
     inventory = {
         **snapshot,
         "waste_value": waste["value"],
         "waste_count": waste["count"],
         "waste_lines": waste["lines"],
+        "remaining_stock": remaining,
     }
 
     return jsonify({
