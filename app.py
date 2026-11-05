@@ -1201,11 +1201,13 @@ def _remaining_stock_for_report(db, business_id):
         (business_id,),
     ).fetchall()
 
+    recipe_ids = [row["id"] for row in products if _product_uses_recipe(row)]
+    recipes_by_product = _get_recipes_by_product_ids(db, recipe_ids, business_id)
     product_items = []
     for row in products:
-        recipe_rows = None
-        if _product_uses_recipe(row):
-            recipe_rows = _get_recipe_rows(db, row["id"], business_id)
+        recipe_rows = (
+            recipes_by_product.get(row["id"]) if _product_uses_recipe(row) else None
+        )
         product = row_to_product(
             row,
             category_cup_map,
@@ -1286,19 +1288,42 @@ def row_to_ingredient(row, include_cost=None):
     return data
 
 
+_RECIPE_SELECT = """SELECT r.id, r.product_id, r.ingredient_id, r.qty_per_unit,
+                  i.name AS ingredient_name, i.unit, i.quantity AS ingredient_quantity,
+                  i.cost_per_unit, i.reorder_level
+           FROM product_recipes r
+           JOIN ingredients i ON i.id = r.ingredient_id"""
+
+
 def _get_recipe_rows(db, product_id, business_id=None):
     if business_id is None:
         business_id = current_business_id()
     return db.execute(
-        """SELECT r.id, r.product_id, r.ingredient_id, r.qty_per_unit,
-                  i.name AS ingredient_name, i.unit, i.quantity AS ingredient_quantity,
-                  i.cost_per_unit, i.reorder_level
-           FROM product_recipes r
-           JOIN ingredients i ON i.id = r.ingredient_id
+        f"""{_RECIPE_SELECT}
            WHERE r.product_id = ? AND r.business_id = ?
            ORDER BY i.name COLLATE NOCASE ASC""",
         (product_id, business_id),
     ).fetchall()
+
+
+def _get_recipes_by_product_ids(db, product_ids, business_id=None):
+    """Load recipe lines for many products in one query. Returns {product_id: [rows]}."""
+    if business_id is None:
+        business_id = current_business_id()
+    ids = sorted({int(pid) for pid in product_ids if pid is not None})
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    rows = db.execute(
+        f"""{_RECIPE_SELECT}
+           WHERE r.business_id = ? AND r.product_id IN ({placeholders})
+           ORDER BY r.product_id ASC, i.name COLLATE NOCASE ASC""",
+        (business_id, *ids),
+    ).fetchall()
+    by_product = {pid: [] for pid in ids}
+    for row in rows:
+        by_product[row["product_id"]].append(row)
+    return by_product
 
 
 def _recipe_lines_payload(rows, include_cost=None):
@@ -1490,21 +1515,49 @@ def _products_response(db, rows, low_only=False):
     category_cup_map = get_category_cup_map(db)
     cup_inventory = get_cup_inventory(db)
     biz_id = current_business_id()
-    recipe_cache = {}
+    recipe_ids = [row["id"] for row in rows if _product_uses_recipe(row)]
+    recipes_by_product = _get_recipes_by_product_ids(db, recipe_ids, biz_id)
     products = []
     for row in rows:
-        recipe_rows = None
-        if _product_uses_recipe(row):
-            pid = row["id"]
-            if pid not in recipe_cache:
-                recipe_cache[pid] = _get_recipe_rows(db, pid, biz_id)
-            recipe_rows = recipe_cache[pid]
+        recipe_rows = (
+            recipes_by_product.get(row["id"]) if _product_uses_recipe(row) else None
+        )
         products.append(
             row_to_product(row, category_cup_map, cup_inventory, recipe_rows=recipe_rows)
         )
     if low_only:
         products = [p for p in products if p["stock_status"] in ("low", "out")]
     return products
+
+
+def _parse_list_pagination(max_limit=500):
+    """Return (limit, offset). limit is None when the client wants the full list."""
+    raw_limit = request.args.get("limit")
+    if raw_limit is None or str(raw_limit).strip() == "":
+        return None, 0
+    try:
+        limit = int(raw_limit)
+        offset = int(request.args.get("offset") or 0)
+    except (TypeError, ValueError):
+        return None, 0
+    limit = min(max(limit, 1), max_limit)
+    offset = max(offset, 0)
+    return limit, offset
+
+
+def _json_list_payload(items, limit=None, offset=0, total=None):
+    if limit is None:
+        return jsonify(items)
+    if total is None:
+        total = len(items)
+    return jsonify(
+        {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+    )
 
 
 def _not_voided_clause(alias=""):
@@ -2603,21 +2656,42 @@ def list_products():
     search = request.args.get("search", "").strip()
     category = request.args.get("category", "").strip()
     low_only = request.args.get("low_stock") == "1"
+    limit, offset = _parse_list_pagination()
 
-    query = "SELECT * FROM products WHERE business_id = ?"
+    where = "WHERE business_id = ?"
     params = [biz_id]
 
     if search:
-        query += " AND (name LIKE ? OR description LIKE ?)"
+        where += " AND (name LIKE ? OR description LIKE ?)"
         like = f"%{search}%"
         params.extend([like, like])
     if category:
-        query += " AND category = ?"
+        where += " AND category = ?"
         params.append(category)
 
-    query += " ORDER BY name ASC"
-    rows = db.execute(query, params).fetchall()
-    return jsonify(_products_response(db, rows, low_only=low_only))
+    # Low-stock depends on recipe/cup enrichment, so filter after building the payload.
+    if low_only or limit is None:
+        rows = db.execute(
+            f"SELECT * FROM products {where} ORDER BY name ASC",
+            params,
+        ).fetchall()
+        products = _products_response(db, rows, low_only=low_only)
+        if limit is None:
+            return _json_list_payload(products)
+        total = len(products)
+        page = products[offset : offset + limit]
+        return _json_list_payload(page, limit=limit, offset=offset, total=total)
+
+    total = db.execute(
+        f"SELECT COUNT(*) AS n FROM products {where}",
+        params,
+    ).fetchone()["n"]
+    rows = db.execute(
+        f"SELECT * FROM products {where} ORDER BY name ASC LIMIT ? OFFSET ?",
+        [*params, limit, offset],
+    ).fetchall()
+    products = _products_response(db, rows, low_only=False)
+    return _json_list_payload(products, limit=limit, offset=offset, total=total)
 
 
 @app.route("/api/products/<int:product_id>", methods=["GET"])
@@ -4928,17 +5002,38 @@ def list_ingredients():
         return err
     search = request.args.get("search", "").strip()
     low_only = request.args.get("low_stock") == "1"
-    query = "SELECT * FROM ingredients WHERE business_id = ?"
+    limit, offset = _parse_list_pagination()
+
+    where = "WHERE business_id = ?"
     params = [biz_id]
     if search:
-        query += " AND name LIKE ?"
+        where += " AND name LIKE ?"
         params.append(f"%{search}%")
-    query += " ORDER BY name COLLATE NOCASE ASC"
-    rows = db.execute(query, params).fetchall()
+
+    if low_only or limit is None:
+        rows = db.execute(
+            f"SELECT * FROM ingredients {where} ORDER BY name COLLATE NOCASE ASC",
+            params,
+        ).fetchall()
+        items = [row_to_ingredient(row) for row in rows]
+        if low_only:
+            items = [i for i in items if i["stock_status"] in ("low", "out")]
+        if limit is None:
+            return _json_list_payload(items)
+        total = len(items)
+        page = items[offset : offset + limit]
+        return _json_list_payload(page, limit=limit, offset=offset, total=total)
+
+    total = db.execute(
+        f"SELECT COUNT(*) AS n FROM ingredients {where}",
+        params,
+    ).fetchone()["n"]
+    rows = db.execute(
+        f"SELECT * FROM ingredients {where} ORDER BY name COLLATE NOCASE ASC LIMIT ? OFFSET ?",
+        [*params, limit, offset],
+    ).fetchall()
     items = [row_to_ingredient(row) for row in rows]
-    if low_only:
-        items = [i for i in items if i["stock_status"] in ("low", "out")]
-    return jsonify(items)
+    return _json_list_payload(items, limit=limit, offset=offset, total=total)
 
 
 @app.route("/api/ingredients/<int:ingredient_id>", methods=["GET"])
@@ -6030,11 +6125,13 @@ def dashboard_stats():
     ).fetchall()
     inventory_value = fifo.inventory_lot_value(db, biz_id)
 
+    recipe_ids = [p["id"] for p in products if _product_uses_recipe(p)]
+    recipes_by_product = _get_recipes_by_product_ids(db, recipe_ids, biz_id)
     enriched = []
     for p in products:
-        recipe_rows = None
-        if _product_uses_recipe(p):
-            recipe_rows = _get_recipe_rows(db, p["id"], biz_id)
+        recipe_rows = (
+            recipes_by_product.get(p["id"]) if _product_uses_recipe(p) else None
+        )
         enriched.append(
             row_to_product(
                 p, category_cup_map, cup_inventory, recipe_rows=recipe_rows

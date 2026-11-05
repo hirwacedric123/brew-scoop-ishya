@@ -412,7 +412,7 @@
           <span class="toolbar-count" id="products-count"></span>
         </div>
 
-        <div class="table-wrap table-premium">
+        <div class="table-wrap table-premium table-virtual" id="products-table-wrap">
           <table class="data-table">
             <thead>
               <tr>
@@ -465,7 +465,7 @@
           <span class="toolbar-count" id="ingredients-count"></span>
         </div>
 
-        <div class="table-wrap table-premium">
+        <div class="table-wrap table-premium table-virtual" id="ingredients-table-wrap">
           <table class="data-table">
             <thead>
               <tr>
@@ -545,6 +545,11 @@
               <div class="card-body sell-pick-body">
                 <div class="sell-category-grid" id="sell-category-grid" role="list" aria-label="Product categories"></div>
                 <div class="quick-pick-grid" id="quick-pick-grid" hidden></div>
+                <div class="table-pagination" id="quick-pick-pagination" hidden>
+                  <button type="button" class="btn btn-ghost btn-sm" id="quick-pick-page-prev">Previous</button>
+                  <span class="table-pagination-info" id="quick-pick-page-info"></span>
+                  <button type="button" class="btn btn-ghost btn-sm" id="quick-pick-page-next">Next</button>
+                </div>
               </div>
             </div>
 
@@ -1232,6 +1237,11 @@
                 </tbody>
               </table>
             </div>
+            <div class="table-pagination" id="lots-pagination" hidden>
+              <button type="button" class="btn btn-ghost btn-sm" id="lots-page-prev">Previous</button>
+              <span class="table-pagination-info" id="lots-page-info"></span>
+              <button type="button" class="btn btn-ghost btn-sm" id="lots-page-next">Next</button>
+            </div>
           </div>
         </div>
       </section>
@@ -1316,6 +1326,11 @@
             </thead>
             <tbody id="history-table-body"></tbody>
           </table>
+        </div>
+        <div class="table-pagination" id="history-pagination" hidden>
+          <button type="button" class="btn btn-ghost btn-sm" id="history-page-prev">Previous</button>
+          <span class="table-pagination-info" id="history-page-info"></span>
+          <button type="button" class="btn btn-ghost btn-sm" id="history-page-next">Next</button>
         </div>
       </section>
 
@@ -1436,10 +1451,20 @@
                   <div>
                     <h4 class="sales-fifo-subhead">Remaining Products</h4>
                     <div id="sales-fifo-remaining-products" class="sales-fifo-list"></div>
+                    <div class="table-pagination" id="remaining-products-pagination" hidden>
+                      <button type="button" class="btn btn-ghost btn-sm" id="remaining-products-page-prev">Previous</button>
+                      <span class="table-pagination-info" id="remaining-products-page-info"></span>
+                      <button type="button" class="btn btn-ghost btn-sm" id="remaining-products-page-next">Next</button>
+                    </div>
                   </div>
                   <div>
                     <h4 class="sales-fifo-subhead">Remaining Ingredients</h4>
                     <div id="sales-fifo-remaining-ingredients" class="sales-fifo-list"></div>
+                    <div class="table-pagination" id="remaining-ingredients-pagination" hidden>
+                      <button type="button" class="btn btn-ghost btn-sm" id="remaining-ingredients-page-prev">Previous</button>
+                      <span class="table-pagination-info" id="remaining-ingredients-page-info"></span>
+                      <button type="button" class="btn btn-ghost btn-sm" id="remaining-ingredients-page-next">Next</button>
+                    </div>
                   </div>
                 </div>
                 <div class="sales-fifo-split sales-fifo-split-secondary">
@@ -1485,6 +1510,11 @@
                   </thead>
                   <tbody id="sales-detail-body"></tbody>
                 </table>
+              </div>
+              <div class="table-pagination" id="sales-detail-pagination" hidden>
+                <button type="button" class="btn btn-ghost btn-sm" id="sales-detail-page-prev">Previous</button>
+                <span class="table-pagination-info" id="sales-detail-page-info"></span>
+                <button type="button" class="btn btn-ghost btn-sm" id="sales-detail-page-next">Next</button>
               </div>
             </div>
           </div>
@@ -1711,6 +1741,11 @@
               </thead>
               <tbody id="activity-logs-table-body"></tbody>
             </table>
+          </div>
+          <div class="table-pagination" id="activity-pagination" hidden>
+            <button type="button" class="btn btn-ghost btn-sm" id="activity-page-prev">Previous</button>
+            <span class="table-pagination-info" id="activity-page-info"></span>
+            <button type="button" class="btn btn-ghost btn-sm" id="activity-page-next">Next</button>
           </div>
         </div>
         {% endif %}

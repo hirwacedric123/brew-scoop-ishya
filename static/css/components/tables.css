@@ -10,6 +10,38 @@
   -webkit-overflow-scrolling: touch;
 }
 
+.table-virtual {
+  max-height: min(70vh, 640px);
+  overflow: auto;
+}
+
+.table-virtual .data-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.table-virtual .virtual-pad td {
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  line-height: 0;
+  height: auto;
+}
+
+.table-virtual .data-table tbody tr:nth-child(even) {
+  background: transparent;
+}
+
+.table-virtual .data-table tbody tr.row-alt {
+  background: var(--foam);
+}
+
+.table-virtual .data-table tbody tr:hover,
+.table-virtual .data-table tbody tr.row-alt:hover {
+  background: var(--cream);
+}
+
 .table-premium .data-table th {
   background: linear-gradient(to bottom, white, color-mix(in srgb, var(--foam) 80%, transparent));
   font-size: 0.68rem;

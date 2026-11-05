@@ -4,7 +4,14 @@
 
 const PRODUCTS_PAGE_SIZE = 40;
 const INGREDIENTS_PAGE_SIZE = 40;
+const TABLE_PAGE_SIZE = 40;
+const QUICK_PICK_PAGE_SIZE = 48;
+const STOCK_LIST_PAGE_SIZE = 20;
+const SHIFT_SALES_INITIAL = 25;
 const CATALOG_CACHE_MS = 45000;
+const CATALOG_FETCH_PAGE_SIZE = 200;
+const VIRTUAL_ROW_HEIGHT = 58;
+const VIRTUAL_OVERSCAN = 8;
 
 const state = {
   products: [],
@@ -26,9 +33,19 @@ const state = {
   shiftsReport: null,
   selectedSalesDate: null,
   selectedShiftId: null,
+  salesDetailPage: 1,
+  salesDetailRows: [],
+  remainingStock: { products: [], ingredients: [] },
+  remainingStockPage: { products: 1, ingredients: 1 },
   historySellerId: "",
   historyShiftPreset: "today",
   selectedHistoryShiftId: null,
+  historyPage: 1,
+  historyRowHtml: [],
+  activityLogs: [],
+  activityPage: 1,
+  lotsPage: 1,
+  sellQuickPickPage: 1,
   salesSellerId: "",
   sellers: [],
   cart: [],
@@ -401,6 +418,187 @@ function invalidateProductsCatalog() {
 
 function invalidateIngredientsCatalog() {
   ingredientsFetchedAt = 0;
+}
+
+/** Normalize list API payloads: bare arrays or { items, total, limit, offset }. */
+function normalizeListPayload(data) {
+  if (Array.isArray(data)) {
+    return { items: data, total: data.length, limit: null, offset: 0 };
+  }
+  const items = Array.isArray(data?.items) ? data.items : [];
+  return {
+    items,
+    total: Number.isFinite(data?.total) ? data.total : items.length,
+    limit: data?.limit ?? null,
+    offset: data?.offset ?? 0,
+  };
+}
+
+function listApiUrl(basePath, { limit, offset } = {}) {
+  const params = new URLSearchParams();
+  if (limit != null) params.set("limit", String(limit));
+  if (offset != null) params.set("offset", String(offset));
+  const qs = params.toString();
+  return qs ? `${basePath}?${qs}` : basePath;
+}
+
+/** Fetch a full catalog via server-side pages, then merge locally. */
+async function fetchAllListPages(basePath, pageSize = CATALOG_FETCH_PAGE_SIZE) {
+  const first = normalizeListPayload(
+    await api(listApiUrl(basePath, { limit: pageSize, offset: 0 }))
+  );
+  const items = first.items.slice();
+  let offset = items.length;
+  const total = first.total;
+
+  while (offset < total) {
+    const page = normalizeListPayload(
+      await api(listApiUrl(basePath, { limit: pageSize, offset }))
+    );
+    if (!page.items.length) break;
+    items.push(...page.items);
+    offset += page.items.length;
+  }
+  return items;
+}
+
+function fetchAllProducts() {
+  return fetchAllListPages("/api/products");
+}
+
+function fetchAllIngredients() {
+  return fetchAllListPages("/api/ingredients");
+}
+
+const virtualTables = {
+  products: {
+    wrapId: "products-table-wrap",
+    tbodyId: "products-table-body",
+    colSpan: 8,
+    items: [],
+    renderRow: null,
+    bound: false,
+  },
+  ingredients: {
+    wrapId: "ingredients-table-wrap",
+    tbodyId: "ingredients-table-body",
+    colSpan: 7,
+    items: [],
+    renderRow: null,
+    bound: false,
+  },
+};
+
+function bindVirtualTable(key) {
+  const vt = virtualTables[key];
+  if (!vt || vt.bound) return;
+  const wrap = document.getElementById(vt.wrapId);
+  if (!wrap) return;
+  vt.bound = true;
+  wrap.addEventListener(
+    "scroll",
+    () => {
+      paintVirtualTable(key);
+    },
+    { passive: true }
+  );
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(() => paintVirtualTable(key)).observe(wrap);
+  }
+}
+
+function paintVirtualTable(key) {
+  const vt = virtualTables[key];
+  if (!vt?.renderRow) return;
+  const wrap = document.getElementById(vt.wrapId);
+  const tbody = document.getElementById(vt.tbodyId);
+  if (!wrap || !tbody) return;
+
+  const items = vt.items || [];
+  if (!items.length) {
+    tbody.innerHTML = "";
+    return;
+  }
+
+  const scrollTop = wrap.scrollTop;
+  const viewport = Math.max(wrap.clientHeight || 0, VIRTUAL_ROW_HEIGHT * 8);
+  const start = Math.max(0, Math.floor(scrollTop / VIRTUAL_ROW_HEIGHT) - VIRTUAL_OVERSCAN);
+  const visibleCount = Math.ceil(viewport / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN * 2;
+  const end = Math.min(items.length, start + visibleCount);
+  const topPad = start * VIRTUAL_ROW_HEIGHT;
+  const bottomPad = Math.max(0, (items.length - end) * VIRTUAL_ROW_HEIGHT);
+  const rows = items
+    .slice(start, end)
+    .map((item, i) => vt.renderRow(item, start + i))
+    .join("");
+
+  tbody.innerHTML = `${
+    topPad
+      ? `<tr class="virtual-pad" aria-hidden="true"><td colspan="${vt.colSpan}" style="height:${topPad}px"></td></tr>`
+      : ""
+  }${rows}${
+    bottomPad
+      ? `<tr class="virtual-pad" aria-hidden="true"><td colspan="${vt.colSpan}" style="height:${bottomPad}px"></td></tr>`
+      : ""
+  }`;
+}
+
+function renderVirtualRows(key, items, renderRow, { resetScroll = false } = {}) {
+  bindVirtualTable(key);
+  const vt = virtualTables[key];
+  vt.items = items;
+  vt.renderRow = renderRow;
+  const wrap = document.getElementById(vt.wrapId);
+  if (wrap && resetScroll) wrap.scrollTop = 0;
+  paintVirtualTable(key);
+}
+
+/** Slice a list for client-side table/grid pagination. */
+function getPageSlice(items, page, pageSize = TABLE_PAGE_SIZE) {
+  const list = Array.isArray(items) ? items : [];
+  const total = list.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize) || 1);
+  const safePage = Math.min(Math.max(1, Number(page) || 1), totalPages);
+  const startIdx = (safePage - 1) * pageSize;
+  return {
+    page: safePage,
+    pageSize,
+    total,
+    totalPages,
+    items: list.slice(startIdx, startIdx + pageSize),
+    start: total ? startIdx + 1 : 0,
+    end: Math.min(startIdx + pageSize, total),
+  };
+}
+
+function updatePager(prefix, slice) {
+  const pager = document.getElementById(`${prefix}-pagination`);
+  const info = document.getElementById(`${prefix}-page-info`);
+  const prevBtn = document.getElementById(`${prefix}-page-prev`);
+  const nextBtn = document.getElementById(`${prefix}-page-next`);
+  if (!pager || !info || !prevBtn || !nextBtn) return;
+
+  if (slice.total <= slice.pageSize) {
+    pager.hidden = true;
+    return;
+  }
+
+  pager.hidden = false;
+  info.textContent = `${fmtNum.format(slice.start)}–${fmtNum.format(slice.end)} of ${fmtNum.format(slice.total)}`;
+  prevBtn.disabled = slice.page <= 1;
+  nextBtn.disabled = slice.page >= slice.totalPages;
+}
+
+function bindPagerControls(prefix, getPage, setPage, render) {
+  document.getElementById(`${prefix}-page-prev`)?.addEventListener("click", () => {
+    if (getPage() <= 1) return;
+    setPage(getPage() - 1);
+    render();
+  });
+  document.getElementById(`${prefix}-page-next`)?.addEventListener("click", () => {
+    setPage(getPage() + 1);
+    render();
+  });
 }
 
 function emptyState(icon, title, message, compact = false) {
@@ -1015,14 +1213,32 @@ async function loadActivityLogs() {
       }
     }
 
-    const logs = data.logs || [];
-    if (!logs.length) {
-      tbody.innerHTML = `<tr><td colspan="4">${emptyState(UI_ICONS.clock, "No activity yet", "Actions for this business will appear here.")}</td></tr>`;
-      return;
-    }
-    tbody.innerHTML = logs
-      .map(
-        (log) => `
+    state.activityLogs = data.logs || [];
+    state.activityPage = 1;
+    renderActivityLogsTable();
+  } catch (err) {
+    toast(err.message, "error");
+    state.activityLogs = [];
+    tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${esc(err.message)}</td></tr>`;
+    updatePager("activity", getPageSlice([], 1));
+  }
+}
+
+function renderActivityLogsTable() {
+  const tbody = document.getElementById("activity-logs-table-body");
+  if (!tbody) return;
+  const logs = state.activityLogs || [];
+  if (!logs.length) {
+    tbody.innerHTML = `<tr><td colspan="4">${emptyState(UI_ICONS.clock, "No activity yet", "Actions for this business will appear here.")}</td></tr>`;
+    updatePager("activity", getPageSlice([], 1));
+    return;
+  }
+
+  const slice = getPageSlice(logs, state.activityPage);
+  state.activityPage = slice.page;
+  tbody.innerHTML = slice.items
+    .map(
+      (log) => `
       <tr class="activity-log-row">
         <td class="activity-when">
           <strong>${esc(formatDate(log.created_at))}</strong>
@@ -1042,12 +1258,9 @@ async function loadActivityLogs() {
         <td><span class="badge badge-category">${esc(log.action_label || log.action)}</span></td>
         <td class="activity-details-cell">${formatActivityDetails(log)}</td>
       </tr>`
-      )
-      .join("");
-  } catch (err) {
-    toast(err.message, "error");
-    tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${esc(err.message)}</td></tr>`;
-  }
+    )
+    .join("");
+  updatePager("activity", slice);
 }
 
 function closeBusinessSwitcher() {
@@ -2459,7 +2672,7 @@ function getFilteredProducts() {
   });
 }
 
-function renderProductsView({ resetPage = false } = {}) {
+function renderProductsView({ resetPage = false, resetScroll = resetPage } = {}) {
   const filtered = getFilteredProducts();
   const totalPages = Math.max(1, Math.ceil(filtered.length / PRODUCTS_PAGE_SIZE) || 1);
 
@@ -2469,7 +2682,7 @@ function renderProductsView({ resetPage = false } = {}) {
 
   const start = (state.productsPage - 1) * PRODUCTS_PAGE_SIZE;
   const pageItems = filtered.slice(start, start + PRODUCTS_PAGE_SIZE);
-  renderProductsTable(pageItems, filtered.length);
+  renderProductsTable(pageItems, filtered.length, { resetScroll });
   renderProductsPagination(filtered.length, totalPages);
 }
 
@@ -2493,7 +2706,7 @@ function renderProductsPagination(totalCount, totalPages) {
   nextBtn.disabled = state.productsPage >= totalPages;
 }
 
-/** Fetch the full catalog. Filters/search/pagination stay client-side for responsiveness. */
+/** Fetch the full catalog in server pages. Filters/search stay client-side. */
 async function loadProducts(options = {}) {
   const force = options.force === true;
   if (!force && state.products.length && catalogIsFresh(productsFetchedAt)) {
@@ -2506,10 +2719,10 @@ async function loadProducts(options = {}) {
   if (isEmpty) showTableSkeleton("products-table-body", 8);
 
   try {
-    const products = await api("/api/products");
+    const products = await fetchAllProducts();
     if (fetchId !== productsFetchId) return;
     setProductsCatalog(products);
-    renderProductsView();
+    renderProductsView({ resetScroll: true });
   } catch (e) {
     if (fetchId !== productsFetchId) return;
     toast(e.message, "error");
@@ -2522,7 +2735,7 @@ async function loadProducts(options = {}) {
   }
 }
 
-function renderProductsTable(products, totalCount = products.length) {
+function renderProductsTable(products, totalCount = products.length, { resetScroll = false } = {}) {
   const tbody = document.getElementById("products-table-body");
   const countEl = document.getElementById("products-count");
   if (countEl) {
@@ -2532,6 +2745,7 @@ function renderProductsTable(products, totalCount = products.length) {
   }
 
   if (!products.length) {
+    if (virtualTables.products) virtualTables.products.items = [];
     tbody.innerHTML = `<tr><td colspan="8">${emptyState(UI_ICONS.box, "No products found", "Try adjusting your filters or add your first item.")}</td></tr>`;
     return;
   }
@@ -2557,10 +2771,11 @@ function renderProductsTable(products, totalCount = products.length) {
       : `<span class="text-muted">View only</span>`;
   };
 
-  tbody.innerHTML = products
-    .map(
-      (p) => `
-    <tr>
+  renderVirtualRows(
+    "products",
+    products,
+    (p, index) => `
+    <tr class="${index % 2 ? "row-alt" : ""}">
       <td>
         ${productCell(
           p.name,
@@ -2586,9 +2801,9 @@ function renderProductsTable(products, totalCount = products.length) {
       <td>
         ${rowActions(p)}
       </td>
-    </tr>`
-    )
-    .join("");
+    </tr>`,
+    { resetScroll }
+  );
 }
 
 function categoryUsesCups(categoryName) {
@@ -2653,7 +2868,7 @@ function ensureIngredientsLoaded(force = false) {
   if (!force && state.ingredients.length && catalogIsFresh(ingredientsFetchedAt)) {
     return Promise.resolve(state.ingredients);
   }
-  return api("/api/ingredients").then((items) => {
+  return fetchAllIngredients().then((items) => {
     setIngredientsCatalog(items);
     return items;
   });
@@ -2771,7 +2986,7 @@ function updateRecipeCostPreview() {
 }
 
 function openAddProduct() {
-  Promise.all([loadCategories(), api("/api/products"), ensureIngredientsLoaded(true)])
+  Promise.all([loadCategories(), fetchAllProducts(), ensureIngredientsLoaded(true)])
     .then(([, products]) => {
       setProductsCatalog(products);
       if (!state.categories.length) {
@@ -2915,7 +3130,7 @@ async function loadSellView() {
     const productsPromise =
       state.products.length && catalogIsFresh(productsFetchedAt)
         ? Promise.resolve(state.products)
-        : api("/api/products");
+        : fetchAllProducts();
     const [products, cups, tables] = await Promise.all([
       productsPromise,
       api("/api/cups"),
@@ -3026,6 +3241,7 @@ function getSellProducts() {
 
 function selectSellCategory(categoryName) {
   state.sellCategory = categoryName || "";
+  state.sellQuickPickPage = 1;
   renderSellBrowse();
   populateProductSelects();
   updateSellPreview();
@@ -3035,6 +3251,7 @@ function selectSellCategory(categoryName) {
 function backToSellCategories() {
   state.sellCategory = "";
   state.sellSearch = "";
+  state.sellQuickPickPage = 1;
   const searchInput = document.getElementById("sell-search");
   if (searchInput) searchInput.value = "";
   renderSellBrowse();
@@ -3076,6 +3293,7 @@ function renderSellBrowse() {
     renderQuickPick();
   } else {
     renderSellCategories();
+    updatePager("quick-pick", getPageSlice([], 1, QUICK_PICK_PAGE_SIZE));
   }
 }
 
@@ -4389,6 +4607,7 @@ function renderShiftSalesHistory(sales) {
 
   const groups = groupShiftSalesByCheckout(sales);
   const saleCount = sales.length;
+  const hasMore = groups.length > SHIFT_SALES_INITIAL;
 
   return `
     <div class="shift-sales-history">
@@ -4399,8 +4618,10 @@ function renderShiftSalesHistory(sales) {
       <div class="shift-sales-list">
         ${groups
           .map(
-            (group) => `
-          <article class="shift-sale-card">
+            (group, index) => `
+          <article class="shift-sale-card${index >= SHIFT_SALES_INITIAL ? " shift-sale-card-more" : ""}"${
+              index >= SHIFT_SALES_INITIAL ? " hidden" : ""
+            }>
             <div class="shift-sale-card-head">
               <span class="shift-sale-time">${esc(formatTime(group.created_at))}</span>
               <span class="shift-sale-pay">${esc(paymentMethodLabel(group.payment_method))}</span>
@@ -4423,6 +4644,13 @@ function renderShiftSalesHistory(sales) {
           )
           .join("")}
       </div>
+      ${
+        hasMore
+          ? `<button type="button" class="btn btn-ghost btn-sm shift-sales-more-btn" data-reveal-shift-sales>
+              Show all ${fmtNum.format(groups.length)} checkouts
+            </button>`
+          : ""
+      }
     </div>
   `;
 }
@@ -4735,7 +4963,7 @@ function getFilteredIngredients() {
   });
 }
 
-function renderIngredientsView({ resetPage = false } = {}) {
+function renderIngredientsView({ resetPage = false, resetScroll = resetPage } = {}) {
   const filtered = getFilteredIngredients();
   const totalPages = Math.max(1, Math.ceil(filtered.length / INGREDIENTS_PAGE_SIZE) || 1);
 
@@ -4745,7 +4973,7 @@ function renderIngredientsView({ resetPage = false } = {}) {
 
   const start = (state.ingredientsPage - 1) * INGREDIENTS_PAGE_SIZE;
   const pageItems = filtered.slice(start, start + INGREDIENTS_PAGE_SIZE);
-  renderIngredientsTable(pageItems, filtered.length);
+  renderIngredientsTable(pageItems, filtered.length, { resetScroll });
   renderIngredientsPagination(filtered.length, totalPages);
 }
 
@@ -4781,10 +5009,10 @@ async function loadIngredients(options = {}) {
   if (isEmpty) showTableSkeleton("ingredients-table-body", 7);
 
   try {
-    const items = await api("/api/ingredients");
+    const items = await fetchAllIngredients();
     if (fetchId !== ingredientsFetchId) return;
     setIngredientsCatalog(items);
-    renderIngredientsView();
+    renderIngredientsView({ resetScroll: true });
   } catch (e) {
     if (fetchId !== ingredientsFetchId) return;
     toast(e.message, "error");
@@ -4797,7 +5025,7 @@ async function loadIngredients(options = {}) {
   }
 }
 
-function renderIngredientsTable(items, totalCount = items.length) {
+function renderIngredientsTable(items, totalCount = items.length, { resetScroll = false } = {}) {
   const tbody = document.getElementById("ingredients-table-body");
   const countEl = document.getElementById("ingredients-count");
   if (!tbody) return;
@@ -4812,6 +5040,7 @@ function renderIngredientsTable(items, totalCount = items.length) {
   const showCost = canViewCost();
 
   if (!items.length) {
+    if (virtualTables.ingredients) virtualTables.ingredients.items = [];
     tbody.innerHTML = `<tr><td colspan="7">${emptyState(
       UI_ICONS.box,
       "No ingredients found",
@@ -4820,8 +5049,10 @@ function renderIngredientsTable(items, totalCount = items.length) {
     return;
   }
 
-  tbody.innerHTML = items
-    .map((ing) => {
+  renderVirtualRows(
+    "ingredients",
+    items,
+    (ing, index) => {
       const actions = canManage
         ? `<div class="action-group">
             <button type="button" class="btn-icon" title="Edit" data-ingredient-action="edit" data-ingredient-id="${ing.id}">${ACTION_ICONS.edit}</button>
@@ -4829,7 +5060,7 @@ function renderIngredientsTable(items, totalCount = items.length) {
           </div>`
         : `<span class="text-muted">View only</span>`;
       return `
-      <tr>
+      <tr class="${index % 2 ? "row-alt" : ""}">
         <td>${productCell(ing.name, esc(ing.unit))}</td>
         <td>${esc(ing.unit)}</td>
         <td><strong>${fmtNum.format(ing.quantity)}</strong></td>
@@ -4838,8 +5069,9 @@ function renderIngredientsTable(items, totalCount = items.length) {
         <td><span class="badge badge-stock ${ing.stock_status}">${stockLabel(ing)}</span></td>
         <td>${actions}</td>
       </tr>`;
-    })
-    .join("");
+    },
+    { resetScroll }
+  );
 }
 
 function openAddIngredient() {
@@ -5025,20 +5257,27 @@ async function loadLotsPanel() {
   try {
     const lots = await api(`/api/lots?${params.toString()}`);
     state.lots = lots;
-    renderLotsTable(lots);
+    state.lotsPage = 1;
+    renderLotsTable();
   } catch (err) {
+    state.lots = [];
     body.innerHTML = `<tr><td colspan="7" class="text-muted">${esc(err.message)}</td></tr>`;
+    updatePager("lots", getPageSlice([], 1));
   }
 }
 
-function renderLotsTable(lots) {
+function renderLotsTable() {
   const body = document.getElementById("lots-table-body");
   if (!body) return;
+  const lots = state.lots || [];
   if (!lots.length) {
     body.innerHTML = `<tr><td colspan="7" class="text-muted">No open lots</td></tr>`;
+    updatePager("lots", getPageSlice([], 1));
     return;
   }
-  body.innerHTML = lots
+  const slice = getPageSlice(lots, state.lotsPage);
+  state.lotsPage = slice.page;
+  body.innerHTML = slice.items
     .map(
       (lot) => `
     <tr>
@@ -5052,6 +5291,7 @@ function renderLotsTable(lots) {
     </tr>`
     )
     .join("");
+  updatePager("lots", slice);
 }
 
 async function loadAdjustLotsForProduct(productId) {
@@ -5083,11 +5323,11 @@ async function loadRestockView() {
     const productsPromise =
       state.products.length && catalogIsFresh(productsFetchedAt)
         ? Promise.resolve(state.products)
-        : api("/api/products");
+        : fetchAllProducts();
     const ingredientsPromise =
       state.ingredients.length && catalogIsFresh(ingredientsFetchedAt)
         ? Promise.resolve(state.ingredients)
-        : api("/api/ingredients");
+        : fetchAllIngredients();
     const [products, cups, ingredients] = await Promise.all([
       productsPromise,
       api("/api/cups"),
@@ -5444,7 +5684,7 @@ async function loadHistory() {
   const category = document.getElementById("history-category-filter")?.value || "";
   state.historySellerId = sellerId;
 
-  const params = new URLSearchParams({ limit: "100" });
+  const params = new URLSearchParams({ limit: "200" });
   if (type) params.set("type", type);
   if (sellerId) params.set("user_id", sellerId);
   if (category) params.set("category", category);
@@ -5453,6 +5693,7 @@ async function loadHistory() {
     const requests = [api(`/api/transactions?${params}`)];
     if (isSeller()) requests.push(loadHistoryShifts());
     const [transactions] = await Promise.all(requests);
+    state.historyPage = 1;
     renderHistory(transactions);
   } catch (e) {
     toast(e.message, "error");
@@ -5666,23 +5907,13 @@ function historyVoidAction(group) {
   return `<div class="history-actions">${invoiceBtn}${voidBtn}</div>`;
 }
 
-function renderHistory(transactions) {
-  const tbody = document.getElementById("history-table-body");
+function buildHistoryRowHtml(transactions) {
   const hideSellerCol = isSeller();
-  const colCount = hideSellerCol ? 9 : 10;
-
-  if (!transactions.length) {
-    tbody.innerHTML = `<tr><td colspan="${colCount}">${emptyState(UI_ICONS.clock, "No transactions", hideSellerCol ? "Your sales will appear here." : "Sales, restocks, and adjustments will appear here.")}</td></tr>`;
-    state.historySaleGroups = new Map();
-    return;
-  }
-
   const { groupedSales, other } = groupHistorySales(transactions);
   state.historySaleGroups = new Map(groupedSales.map((g) => [g.checkout_ref, g]));
 
-  const saleRows = groupedSales
-    .map(
-      (group) => `
+  const saleRows = groupedSales.map(
+    (group) => `
     <tr class="${group.is_voided ? "history-row-voided" : ""}">
       <td>${formatDate(group.created_at)}</td>
       <td>${historySaleProductCell(group)}</td>
@@ -5695,12 +5926,10 @@ function renderHistory(transactions) {
       <td style="color:var(--text-muted);font-size:0.82rem">${esc(group.checkout_ref || group.notes || "—")}</td>
       <td>${historyVoidAction(group)}</td>
     </tr>`
-    )
-    .join("");
+  );
 
-  const otherRows = other
-    .map(
-      (t) => `
+  const otherRows = other.map(
+    (t) => `
     <tr>
       <td>${formatDate(t.created_at)}</td>
       <td>${productCell(t.product_name, esc(t.category))}</td>
@@ -5713,10 +5942,43 @@ function renderHistory(transactions) {
       <td style="color:var(--text-muted);font-size:0.82rem">${esc(t.notes || "—")}</td>
       <td>—</td>
     </tr>`
-    )
-    .join("");
+  );
 
-  tbody.innerHTML = saleRows + otherRows;
+  return saleRows.concat(otherRows);
+}
+
+function renderHistory(transactions) {
+  const tbody = document.getElementById("history-table-body");
+  const hideSellerCol = isSeller();
+  const colCount = hideSellerCol ? 9 : 10;
+
+  if (!transactions.length) {
+    tbody.innerHTML = `<tr><td colspan="${colCount}">${emptyState(UI_ICONS.clock, "No transactions", hideSellerCol ? "Your sales will appear here." : "Sales, restocks, and adjustments will appear here.")}</td></tr>`;
+    state.historySaleGroups = new Map();
+    state.historyRowHtml = [];
+    updatePager("history", getPageSlice([], 1));
+    return;
+  }
+
+  state.historyRowHtml = buildHistoryRowHtml(transactions);
+  renderHistoryPage();
+}
+
+function renderHistoryPage() {
+  const tbody = document.getElementById("history-table-body");
+  if (!tbody) return;
+  const hideSellerCol = isSeller();
+  const colCount = hideSellerCol ? 9 : 10;
+  const rows = state.historyRowHtml || [];
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="${colCount}">${emptyState(UI_ICONS.clock, "No transactions", hideSellerCol ? "Your sales will appear here." : "Sales, restocks, and adjustments will appear here.")}</td></tr>`;
+    updatePager("history", getPageSlice([], 1));
+    return;
+  }
+  const slice = getPageSlice(rows, state.historyPage);
+  state.historyPage = slice.page;
+  tbody.innerHTML = slice.items.join("");
+  updatePager("history", slice);
 }
 
 function openVoidSaleModal(checkoutRef) {
@@ -6103,13 +6365,19 @@ function remainingStockBadgeLabel(item) {
   return remainingStockQtyLabel(item);
 }
 
-function renderRemainingStockList(el, items, emptyTitle, emptyHint) {
+function renderRemainingStockList(el, items, emptyTitle, emptyHint, pagerPrefix) {
   if (!el) return;
   if (!items.length) {
     el.innerHTML = emptyState(UI_ICONS.box, emptyTitle, emptyHint, true);
+    if (pagerPrefix) updatePager(pagerPrefix, getPageSlice([], 1, STOCK_LIST_PAGE_SIZE));
     return;
   }
-  el.innerHTML = items
+
+  const pageKey = pagerPrefix === "remaining-ingredients" ? "ingredients" : "products";
+  const slice = getPageSlice(items, state.remainingStockPage[pageKey], STOCK_LIST_PAGE_SIZE);
+  state.remainingStockPage[pageKey] = slice.page;
+
+  el.innerHTML = slice.items
     .map((item) => {
       const meta =
         item.kind === "cup"
@@ -6132,6 +6400,7 @@ function renderRemainingStockList(el, items, emptyTitle, emptyHint) {
       </div>`;
     })
     .join("");
+  if (pagerPrefix) updatePager(pagerPrefix, slice);
 }
 
 function renderSalesFifoSection(inventory, from, to) {
@@ -6189,17 +6458,24 @@ function renderSalesFifoSection(inventory, from, to) {
       unit: "cups",
     });
   }
+  state.remainingStock = {
+    products: productRows,
+    ingredients: remaining.ingredients || [],
+  };
+  state.remainingStockPage = { products: 1, ingredients: 1 };
   renderRemainingStockList(
     remainingProductsEl,
     productRows,
     "No product stock",
-    "Add products or restock finished goods to see remaining quantities."
+    "Add products or restock finished goods to see remaining quantities.",
+    "remaining-products"
   );
   renderRemainingStockList(
     remainingIngredientsEl,
-    remaining.ingredients || [],
+    state.remainingStock.ingredients,
     "No ingredients",
-    "Add ingredients to track raw material remaining stock."
+    "Add ingredients to track raw material remaining stock.",
+    "remaining-ingredients"
   );
 
   const expiring = inv.expiring_lots || [];
@@ -6318,7 +6594,7 @@ function renderSalesReport(report) {
     .map(
       (day) => `
     <button type="button" class="sales-date-item ${state.selectedSalesDate === day.date ? "active" : ""}"
-      onclick="selectSalesDate('${day.date}')">
+      data-sales-date="${escAttr(day.date)}">
       <div class="sales-date-info">
         <strong>${formatDateLabel(day.date)}</strong>
         <span>${fmtNum.format(day.transactions)} sale${day.transactions !== 1 ? "s" : ""} · ${fmtNum.format(day.units)} units</span>
@@ -6329,6 +6605,7 @@ function renderSalesReport(report) {
     )
     .join("");
 
+  state.salesDetailPage = 1;
   const detailSales = state.selectedSalesDate
     ? sales.filter((s) => s.sale_date === state.selectedSalesDate)
     : sales;
@@ -6340,6 +6617,8 @@ function renderSalesDetail(sales, date, from, to) {
   const title = document.getElementById("sales-detail-title");
   const subtitle = document.getElementById("sales-detail-subtitle");
   const tbody = document.getElementById("sales-detail-body");
+  state.salesDetailRows = sales || [];
+  state.salesDetailMeta = { date, from, to };
 
   if (date) {
     title.textContent = `Sales on ${formatDateLabel(date)}`;
@@ -6352,13 +6631,24 @@ function renderSalesDetail(sales, date, from, to) {
     subtitle.textContent = "";
   }
 
+  renderSalesDetailPage();
+}
+
+function renderSalesDetailPage() {
+  const tbody = document.getElementById("sales-detail-body");
+  if (!tbody) return;
+  const sales = state.salesDetailRows || [];
+  const cols = isSeller() ? 6 : 7;
+
   if (!sales.length) {
-    const cols = isSeller() ? 6 : 7;
     tbody.innerHTML = `<tr><td colspan="${cols}">${emptyState(UI_ICONS.sales, "No sales", "Select a date or adjust your date range.")}</td></tr>`;
+    updatePager("sales-detail", getPageSlice([], 1));
     return;
   }
 
-  tbody.innerHTML = sales
+  const slice = getPageSlice(sales, state.salesDetailPage);
+  state.salesDetailPage = slice.page;
+  tbody.innerHTML = slice.items
     .map(
       (s) => `
     <tr>
@@ -6374,13 +6664,26 @@ function renderSalesDetail(sales, date, from, to) {
     </tr>`
     )
     .join("");
+  updatePager("sales-detail", slice);
 }
 
 function selectSalesDate(date) {
   state.selectedSalesDate = state.selectedSalesDate === date ? null : date;
-  if (state.salesReport) {
-    renderSalesReport(state.salesReport);
-  }
+  state.salesDetailPage = 1;
+  const report = state.salesReport;
+  if (!report) return;
+
+  document.querySelectorAll("#sales-dates-list .sales-date-item").forEach((btn) => {
+    const btnDate = btn.getAttribute("data-sales-date");
+    btn.classList.toggle("active", btnDate === state.selectedSalesDate);
+  });
+
+  const { sales, from, to } = report;
+  const detailSales = state.selectedSalesDate
+    ? sales.filter((s) => s.sale_date === state.selectedSalesDate)
+    : sales;
+  const detailDate = state.selectedSalesDate || (from === to ? from : null);
+  renderSalesDetail(detailSales, detailDate, from, to);
 }
 
 async function loadShiftsReport(from, to) {
@@ -7416,11 +7719,11 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("products-page-prev")?.addEventListener("click", () => {
     if (state.productsPage <= 1) return;
     state.productsPage -= 1;
-    renderProductsView();
+    renderProductsView({ resetScroll: true });
   });
   document.getElementById("products-page-next")?.addEventListener("click", () => {
     state.productsPage += 1;
-    renderProductsView();
+    renderProductsView({ resetScroll: true });
   });
   document.getElementById("products-table-body")?.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-product-action]");
@@ -7444,11 +7747,11 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("ingredients-page-prev")?.addEventListener("click", () => {
     if (state.ingredientsPage <= 1) return;
     state.ingredientsPage -= 1;
-    renderIngredientsView();
+    renderIngredientsView({ resetScroll: true });
   });
   document.getElementById("ingredients-page-next")?.addEventListener("click", () => {
     state.ingredientsPage += 1;
-    renderIngredientsView();
+    renderIngredientsView({ resetScroll: true });
   });
   document.getElementById("ingredients-table-body")?.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-ingredient-action]");
@@ -7462,6 +7765,100 @@ document.addEventListener("DOMContentLoaded", () => {
       openDeleteIngredient(id, ingredient?.name || "this ingredient");
     }
   });
+
+  bindPagerControls(
+    "history",
+    () => state.historyPage,
+    (page) => {
+      state.historyPage = page;
+    },
+    renderHistoryPage
+  );
+  bindPagerControls(
+    "activity",
+    () => state.activityPage,
+    (page) => {
+      state.activityPage = page;
+    },
+    renderActivityLogsTable
+  );
+  bindPagerControls(
+    "lots",
+    () => state.lotsPage,
+    (page) => {
+      state.lotsPage = page;
+    },
+    renderLotsTable
+  );
+  bindPagerControls(
+    "sales-detail",
+    () => state.salesDetailPage,
+    (page) => {
+      state.salesDetailPage = page;
+    },
+    renderSalesDetailPage
+  );
+  bindPagerControls(
+    "remaining-products",
+    () => state.remainingStockPage.products,
+    (page) => {
+      state.remainingStockPage.products = page;
+    },
+    () =>
+      renderRemainingStockList(
+        document.getElementById("sales-fifo-remaining-products"),
+        state.remainingStock.products || [],
+        "No product stock",
+        "Add products or restock finished goods to see remaining quantities.",
+        "remaining-products"
+      )
+  );
+  bindPagerControls(
+    "remaining-ingredients",
+    () => state.remainingStockPage.ingredients,
+    (page) => {
+      state.remainingStockPage.ingredients = page;
+    },
+    () =>
+      renderRemainingStockList(
+        document.getElementById("sales-fifo-remaining-ingredients"),
+        state.remainingStock.ingredients || [],
+        "No ingredients",
+        "Add ingredients to track raw material remaining stock.",
+        "remaining-ingredients"
+      )
+  );
+  bindPagerControls(
+    "quick-pick",
+    () => state.sellQuickPickPage,
+    (page) => {
+      state.sellQuickPickPage = page;
+    },
+    renderQuickPick
+  );
+
+  document.getElementById("sales-dates-list")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-sales-date]");
+    if (!btn) return;
+    selectSalesDate(btn.dataset.salesDate);
+  });
+  document.getElementById("quick-pick-grid")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-quick-pick-id]");
+    if (!btn || btn.disabled) return;
+    const id = Number(btn.dataset.quickPickId);
+    if (id) addToCart(id, 1);
+  });
+  document.addEventListener("click", (e) => {
+    const moreBtn = e.target.closest("[data-reveal-shift-sales]");
+    if (!moreBtn) return;
+    const root = moreBtn.closest(".shift-sales-history");
+    if (!root) return;
+    root.querySelectorAll(".shift-sale-card-more").forEach((card) => {
+      card.hidden = false;
+    });
+    moreBtn.remove();
+  });
+
   document.getElementById("product-name")?.addEventListener("input", () => {
     syncCategoryFromProductName();
     updateProductStockFields();
@@ -7502,6 +7899,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const debouncedRenderQuickPick = debounce(() => renderQuickPick(), 150);
   document.getElementById("sell-search")?.addEventListener("input", (e) => {
     state.sellSearch = e.target.value;
+    state.sellQuickPickPage = 1;
     debouncedRenderQuickPick();
   });
 

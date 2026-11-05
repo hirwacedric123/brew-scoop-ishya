@@ -1262,6 +1262,11 @@
   white-space: nowrap;
 }
 
+.shift-sales-more-btn {
+  margin-top: 0.75rem;
+  width: 100%;
+}
+
 .shift-sales-list {
   display: flex;
   flex-direction: column;

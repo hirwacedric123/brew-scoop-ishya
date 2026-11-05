@@ -534,6 +534,11 @@
   animation: sell-fade-in 0.22s ease;
 }
 
+#quick-pick-pagination {
+  margin-top: 0.85rem;
+  justify-content: center;
+}
+
 @keyframes sell-fade-in {
   from {
     opacity: 0;
