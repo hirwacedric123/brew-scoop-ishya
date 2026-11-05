@@ -2,9 +2,15 @@
  * Brew & Scoop Stock Management — Frontend
  */
 
+const PRODUCTS_PAGE_SIZE = 40;
+const INGREDIENTS_PAGE_SIZE = 40;
+const CATALOG_CACHE_MS = 45000;
+
 const state = {
   products: [],
+  productsPage: 1,
   ingredients: [],
+  ingredientsPage: 1,
   categories: [],
   cupInventory: null,
   dashboard: null,
@@ -365,6 +371,37 @@ const UI_ICONS = {
   clock: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,
   check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`,
 };
+
+const ACTION_ICONS = {
+  edit: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
+  sell: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>`,
+  trash: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`,
+};
+
+let productsFetchedAt = 0;
+let ingredientsFetchedAt = 0;
+
+function setProductsCatalog(products) {
+  state.products = Array.isArray(products) ? products : [];
+  productsFetchedAt = Date.now();
+}
+
+function setIngredientsCatalog(items) {
+  state.ingredients = Array.isArray(items) ? items : [];
+  ingredientsFetchedAt = Date.now();
+}
+
+function catalogIsFresh(fetchedAt) {
+  return fetchedAt > 0 && Date.now() - fetchedAt < CATALOG_CACHE_MS;
+}
+
+function invalidateProductsCatalog() {
+  productsFetchedAt = 0;
+}
+
+function invalidateIngredientsCatalog() {
+  ingredientsFetchedAt = 0;
+}
 
 function emptyState(icon, title, message, compact = false) {
   if (compact) {
@@ -2403,32 +2440,94 @@ function renderDashboard(d) {
 
 // ── Products ───────────────────────────────────────────────────────────────
 
-async function loadProducts() {
-  const search = document.getElementById("product-search").value;
-  const category = document.getElementById("product-category-filter").value;
-  const lowStock = document.getElementById("low-stock-filter").checked;
+let productsFetchId = 0;
 
-  const params = new URLSearchParams();
-  if (search) params.set("search", search);
-  if (category) params.set("category", category);
-  if (lowStock) params.set("low_stock", "1");
+function getFilteredProducts() {
+  const search = (document.getElementById("product-search")?.value || "").trim().toLowerCase();
+  const category = document.getElementById("product-category-filter")?.value || "";
+  const lowStock = !!document.getElementById("low-stock-filter")?.checked;
 
-  showTableSkeleton("products-table-body", 8);
+  return state.products.filter((p) => {
+    if (category && p.category !== category) return false;
+    if (lowStock && p.stock_status !== "low" && p.stock_status !== "out") return false;
+    if (search) {
+      const name = (p.name || "").toLowerCase();
+      const description = (p.description || "").toLowerCase();
+      if (!name.includes(search) && !description.includes(search)) return false;
+    }
+    return true;
+  });
+}
+
+function renderProductsView({ resetPage = false } = {}) {
+  const filtered = getFilteredProducts();
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PRODUCTS_PAGE_SIZE) || 1);
+
+  if (resetPage) state.productsPage = 1;
+  if (state.productsPage > totalPages) state.productsPage = totalPages;
+  if (state.productsPage < 1) state.productsPage = 1;
+
+  const start = (state.productsPage - 1) * PRODUCTS_PAGE_SIZE;
+  const pageItems = filtered.slice(start, start + PRODUCTS_PAGE_SIZE);
+  renderProductsTable(pageItems, filtered.length);
+  renderProductsPagination(filtered.length, totalPages);
+}
+
+function renderProductsPagination(totalCount, totalPages) {
+  const pager = document.getElementById("products-pagination");
+  const info = document.getElementById("products-page-info");
+  const prevBtn = document.getElementById("products-page-prev");
+  const nextBtn = document.getElementById("products-page-next");
+  if (!pager || !info || !prevBtn || !nextBtn) return;
+
+  if (totalCount <= PRODUCTS_PAGE_SIZE) {
+    pager.hidden = true;
+    return;
+  }
+
+  pager.hidden = false;
+  const start = (state.productsPage - 1) * PRODUCTS_PAGE_SIZE + 1;
+  const end = Math.min(state.productsPage * PRODUCTS_PAGE_SIZE, totalCount);
+  info.textContent = `${fmtNum.format(start)}–${fmtNum.format(end)} of ${fmtNum.format(totalCount)}`;
+  prevBtn.disabled = state.productsPage <= 1;
+  nextBtn.disabled = state.productsPage >= totalPages;
+}
+
+/** Fetch the full catalog. Filters/search/pagination stay client-side for responsiveness. */
+async function loadProducts(options = {}) {
+  const force = options.force === true;
+  if (!force && state.products.length && catalogIsFresh(productsFetchedAt)) {
+    renderProductsView();
+    return;
+  }
+
+  const fetchId = ++productsFetchId;
+  const isEmpty = !state.products.length;
+  if (isEmpty) showTableSkeleton("products-table-body", 8);
 
   try {
-    state.products = await api(`/api/products?${params}`);
-    renderProductsTable(state.products);
+    const products = await api("/api/products");
+    if (fetchId !== productsFetchId) return;
+    setProductsCatalog(products);
+    renderProductsView();
   } catch (e) {
+    if (fetchId !== productsFetchId) return;
     toast(e.message, "error");
+    if (isEmpty) {
+      const tbody = document.getElementById("products-table-body");
+      if (tbody) {
+        tbody.innerHTML = `<tr><td colspan="8">${emptyState(UI_ICONS.box, "Could not load products", e.message)}</td></tr>`;
+      }
+    }
   }
 }
 
-function renderProductsTable(products) {
+function renderProductsTable(products, totalCount = products.length) {
   const tbody = document.getElementById("products-table-body");
   const countEl = document.getElementById("products-count");
   if (countEl) {
-    countEl.innerHTML = products.length
-      ? `<strong>${fmtNum.format(products.length)}</strong> product${products.length !== 1 ? "s" : ""}`
+    countEl.innerHTML = totalCount
+      ? `<strong>${fmtNum.format(totalCount)}</strong> product${totalCount !== 1 ? "s" : ""}`
       : "No products";
   }
 
@@ -2441,24 +2540,17 @@ function renderProductsTable(products) {
   const canManage = role === "admin" || role === "stock_manager";
   const canSell = role === "admin" || role === "stock_manager";
 
-  const editBtn = (p) => `
-          <button class="btn-icon" title="Edit" onclick="openEditProduct(${p.id})">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-          </button>`;
-  const sellBtn = (p) => `
-          <button class="btn-icon" title="Sell" onclick="quickSell(${p.id})">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
-          </button>`;
-  const deleteBtn = (p) => `
-          <button class="btn-icon danger" title="Delete" onclick="openDeleteProduct(${p.id}, '${escAttr(p.name)}')">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-          </button>`;
-
   const rowActions = (p) => {
     const buttons = [
-      canManage ? editBtn(p) : "",
-      canSell ? sellBtn(p) : "",
-      canManage ? deleteBtn(p) : "",
+      canManage
+        ? `<button type="button" class="btn-icon" title="Edit" data-product-action="edit" data-product-id="${p.id}">${ACTION_ICONS.edit}</button>`
+        : "",
+      canSell
+        ? `<button type="button" class="btn-icon" title="Sell" data-product-action="sell" data-product-id="${p.id}">${ACTION_ICONS.sell}</button>`
+        : "",
+      canManage
+        ? `<button type="button" class="btn-icon danger" title="Delete" data-product-action="delete" data-product-id="${p.id}">${ACTION_ICONS.trash}</button>`
+        : "",
     ].join("");
     return buttons
       ? `<div class="action-group">${buttons}</div>`
@@ -2558,11 +2650,11 @@ function updateProductStockFields() {
 }
 
 function ensureIngredientsLoaded(force = false) {
-  if (!force && state.ingredients.length) {
+  if (!force && state.ingredients.length && catalogIsFresh(ingredientsFetchedAt)) {
     return Promise.resolve(state.ingredients);
   }
   return api("/api/ingredients").then((items) => {
-    state.ingredients = items;
+    setIngredientsCatalog(items);
     return items;
   });
 }
@@ -2681,7 +2773,7 @@ function updateRecipeCostPreview() {
 function openAddProduct() {
   Promise.all([loadCategories(), api("/api/products"), ensureIngredientsLoaded(true)])
     .then(([, products]) => {
-      state.products = products;
+      setProductsCatalog(products);
       if (!state.categories.length) {
         toast("Add a category in Admin before creating products", "error");
         return;
@@ -2796,7 +2888,7 @@ async function saveProduct(e) {
       toast("Product added");
     }
     hideModal("product-modal");
-    loadProducts();
+    loadProducts({ force: true });
   } catch (err) {
     toast(err.message, "error");
   }
@@ -2807,7 +2899,7 @@ async function confirmDelete() {
     await api(`/api/products/${state.deleteProductId}`, { method: "DELETE" });
     toast("Product deleted");
     hideModal("delete-modal");
-    loadProducts();
+    loadProducts({ force: true });
   } catch (e) {
     toast(e.message, "error");
   }
@@ -2820,12 +2912,16 @@ async function loadSellView() {
     if (isSeller()) {
       await refreshSellerShift();
     }
+    const productsPromise =
+      state.products.length && catalogIsFresh(productsFetchedAt)
+        ? Promise.resolve(state.products)
+        : api("/api/products");
     const [products, cups, tables] = await Promise.all([
-      api("/api/products"),
+      productsPromise,
       api("/api/cups"),
       api("/api/tables"),
     ]);
-    state.products = products;
+    setProductsCatalog(products);
     state.cupInventory = cups;
     state.serviceTables = tables;
     if (!state.categories.length) {
@@ -3534,6 +3630,7 @@ async function completeCheckout() {
     );
 
     applyClearCart();
+    invalidateProductsCatalog();
     await loadSellView();
     if (!isSeller()) loadDashboard();
 
@@ -4625,27 +4722,90 @@ function initCashNoteInputs() {
 
 // ── Ingredients ────────────────────────────────────────────────────────────
 
-async function loadIngredients() {
+let ingredientsFetchId = 0;
+
+function getFilteredIngredients() {
+  const search = (document.getElementById("ingredient-search")?.value || "").trim().toLowerCase();
+  const lowOnly = !!document.getElementById("ingredient-low-stock-filter")?.checked;
+
+  return (state.ingredients || []).filter((ing) => {
+    if (lowOnly && ing.stock_status !== "low" && ing.stock_status !== "out") return false;
+    if (search && !(ing.name || "").toLowerCase().includes(search)) return false;
+    return true;
+  });
+}
+
+function renderIngredientsView({ resetPage = false } = {}) {
+  const filtered = getFilteredIngredients();
+  const totalPages = Math.max(1, Math.ceil(filtered.length / INGREDIENTS_PAGE_SIZE) || 1);
+
+  if (resetPage) state.ingredientsPage = 1;
+  if (state.ingredientsPage > totalPages) state.ingredientsPage = totalPages;
+  if (state.ingredientsPage < 1) state.ingredientsPage = 1;
+
+  const start = (state.ingredientsPage - 1) * INGREDIENTS_PAGE_SIZE;
+  const pageItems = filtered.slice(start, start + INGREDIENTS_PAGE_SIZE);
+  renderIngredientsTable(pageItems, filtered.length);
+  renderIngredientsPagination(filtered.length, totalPages);
+}
+
+function renderIngredientsPagination(totalCount, totalPages) {
+  const pager = document.getElementById("ingredients-pagination");
+  const info = document.getElementById("ingredients-page-info");
+  const prevBtn = document.getElementById("ingredients-page-prev");
+  const nextBtn = document.getElementById("ingredients-page-next");
+  if (!pager || !info || !prevBtn || !nextBtn) return;
+
+  if (totalCount <= INGREDIENTS_PAGE_SIZE) {
+    pager.hidden = true;
+    return;
+  }
+
+  pager.hidden = false;
+  const start = (state.ingredientsPage - 1) * INGREDIENTS_PAGE_SIZE + 1;
+  const end = Math.min(state.ingredientsPage * INGREDIENTS_PAGE_SIZE, totalCount);
+  info.textContent = `${fmtNum.format(start)}–${fmtNum.format(end)} of ${fmtNum.format(totalCount)}`;
+  prevBtn.disabled = state.ingredientsPage <= 1;
+  nextBtn.disabled = state.ingredientsPage >= totalPages;
+}
+
+async function loadIngredients(options = {}) {
+  const force = options.force === true;
+  if (!force && state.ingredients.length && catalogIsFresh(ingredientsFetchedAt)) {
+    renderIngredientsView();
+    return;
+  }
+
+  const fetchId = ++ingredientsFetchId;
+  const isEmpty = !state.ingredients.length;
+  if (isEmpty) showTableSkeleton("ingredients-table-body", 7);
+
   try {
-    const search = document.getElementById("ingredient-search")?.value?.trim() || "";
-    const lowOnly = document.getElementById("ingredient-low-stock-filter")?.checked;
-    const params = new URLSearchParams();
-    if (search) params.set("search", search);
-    if (lowOnly) params.set("low_stock", "1");
-    const qs = params.toString();
-    state.ingredients = await api(`/api/ingredients${qs ? `?${qs}` : ""}`);
-    renderIngredientsTable();
+    const items = await api("/api/ingredients");
+    if (fetchId !== ingredientsFetchId) return;
+    setIngredientsCatalog(items);
+    renderIngredientsView();
   } catch (e) {
+    if (fetchId !== ingredientsFetchId) return;
     toast(e.message, "error");
+    if (isEmpty) {
+      const tbody = document.getElementById("ingredients-table-body");
+      if (tbody) {
+        tbody.innerHTML = `<tr><td colspan="7">${emptyState(UI_ICONS.box, "Could not load ingredients", e.message)}</td></tr>`;
+      }
+    }
   }
 }
 
-function renderIngredientsTable() {
+function renderIngredientsTable(items, totalCount = items.length) {
   const tbody = document.getElementById("ingredients-table-body");
   const countEl = document.getElementById("ingredients-count");
   if (!tbody) return;
-  const items = state.ingredients || [];
-  if (countEl) countEl.textContent = `${items.length} ingredient${items.length === 1 ? "" : "s"}`;
+  if (countEl) {
+    countEl.innerHTML = totalCount
+      ? `<strong>${fmtNum.format(totalCount)}</strong> ingredient${totalCount === 1 ? "" : "s"}`
+      : "No ingredients";
+  }
 
   const role = state.currentUser?.role;
   const canManage = role === "admin" || role === "stock_manager";
@@ -4654,8 +4814,8 @@ function renderIngredientsTable() {
   if (!items.length) {
     tbody.innerHTML = `<tr><td colspan="7">${emptyState(
       UI_ICONS.box,
-      "No ingredients yet",
-      "Add raw materials like beetroot, sugar, or burger buns."
+      "No ingredients found",
+      "Try adjusting your filters or add raw materials like beetroot, sugar, or burger buns."
     )}</td></tr>`;
     return;
   }
@@ -4664,12 +4824,8 @@ function renderIngredientsTable() {
     .map((ing) => {
       const actions = canManage
         ? `<div class="action-group">
-            <button class="btn-icon" title="Edit" onclick="openEditIngredient(${ing.id})">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-            </button>
-            <button class="btn-icon danger" title="Delete" onclick="openDeleteIngredient(${ing.id}, '${escAttr(ing.name)}')">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-            </button>
+            <button type="button" class="btn-icon" title="Edit" data-ingredient-action="edit" data-ingredient-id="${ing.id}">${ACTION_ICONS.edit}</button>
+            <button type="button" class="btn-icon danger" title="Delete" data-ingredient-action="delete" data-ingredient-id="${ing.id}">${ACTION_ICONS.trash}</button>
           </div>`
         : `<span class="text-muted">View only</span>`;
       return `
@@ -4754,7 +4910,7 @@ async function saveIngredient(e) {
       toast("Ingredient added");
     }
     hideModal("ingredient-modal");
-    loadIngredients();
+    loadIngredients({ force: true });
   } catch (err) {
     toast(err.message, "error");
   }
@@ -4765,7 +4921,7 @@ async function confirmDeleteIngredient() {
     await api(`/api/ingredients/${state.deleteIngredientId}`, { method: "DELETE" });
     toast("Ingredient deleted");
     hideModal("delete-ingredient-modal");
-    loadIngredients();
+    loadIngredients({ force: true });
   } catch (e) {
     toast(e.message, "error");
   }
@@ -4822,6 +4978,8 @@ async function submitIngredientRestock(e) {
     const idx = state.ingredients.findIndex((i) => i.id === updated.id);
     if (idx >= 0) state.ingredients[idx] = updated;
     else state.ingredients.push(updated);
+    ingredientsFetchedAt = Date.now();
+    invalidateProductsCatalog();
     toast(`Added ${quantity} ${updated.unit} of ${updated.name}`);
     document.getElementById("ingredient-restock-notes").value = "";
     const expiryInput = document.getElementById("ingredient-restock-expiry");
@@ -4922,14 +5080,22 @@ async function loadAdjustLotsForProduct(productId) {
 
 async function loadRestockView() {
   try {
+    const productsPromise =
+      state.products.length && catalogIsFresh(productsFetchedAt)
+        ? Promise.resolve(state.products)
+        : api("/api/products");
+    const ingredientsPromise =
+      state.ingredients.length && catalogIsFresh(ingredientsFetchedAt)
+        ? Promise.resolve(state.ingredients)
+        : api("/api/ingredients");
     const [products, cups, ingredients] = await Promise.all([
-      api("/api/products"),
+      productsPromise,
       api("/api/cups"),
-      api("/api/ingredients"),
+      ingredientsPromise,
     ]);
-    state.products = products;
+    setProductsCatalog(products);
     state.cupInventory = cups;
-    state.ingredients = ingredients;
+    setIngredientsCatalog(ingredients);
     populateProductSelects();
     renderCupRestock();
     renderRestockLowStock();
@@ -4985,7 +5151,7 @@ async function submitCupRestock(e) {
     renderCupRestock();
     renderRestockLowStock();
     loadLotsPanel();
-    await loadProducts();
+    await loadProducts({ force: true });
   } catch (err) {
     toast(err.message, "error");
   }
@@ -5180,6 +5346,7 @@ async function submitRestock(e) {
       delete costInput.dataset.touched;
     }
     document.getElementById("restock-preview").hidden = true;
+    invalidateProductsCatalog();
     switchView("products");
   } catch (err) {
     toast(err.message, "error");
@@ -5204,6 +5371,7 @@ async function submitAdjust(e) {
     document.getElementById("adjust-form").reset();
     const lotGroup = document.getElementById("adjust-lot-group");
     if (lotGroup) lotGroup.hidden = true;
+    invalidateProductsCatalog();
     loadRestockView();
   } catch (err) {
     toast(err.message, "error");
@@ -5575,6 +5743,7 @@ async function submitVoidSale(e) {
     hideModal("void-sale-modal");
     state.voidCheckoutRef = null;
     toast(data.message || "Sale voided", "success");
+    invalidateProductsCatalog();
     await loadHistory();
     if (!isSeller()) loadDashboard();
   } catch (err) {
@@ -7112,9 +7281,12 @@ function formatDate(iso) {
 }
 
 function esc(str) {
-  const d = document.createElement("div");
-  d.textContent = str;
-  return d.innerHTML;
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function escAttr(str) {
@@ -7233,19 +7405,63 @@ document.addEventListener("DOMContentLoaded", () => {
     removeRecipeLine(Number(btn.dataset.removeRecipeLine));
   });
 
-  const debouncedLoadProducts = debounce(loadProducts, 300);
-  document.getElementById("product-search")?.addEventListener("input", () => {
-    showTableSkeleton("products-table-body", 8);
-    debouncedLoadProducts();
+  const debouncedApplyProductsFilters = debounce(() => renderProductsView({ resetPage: true }), 150);
+  document.getElementById("product-search")?.addEventListener("input", debouncedApplyProductsFilters);
+  document.getElementById("product-category-filter")?.addEventListener("change", () => {
+    renderProductsView({ resetPage: true });
   });
-  document.getElementById("product-category-filter")?.addEventListener("change", loadProducts);
-  document.getElementById("low-stock-filter")?.addEventListener("change", loadProducts);
-  const debouncedLoadIngredients = debounce(loadIngredients, 300);
-  document.getElementById("ingredient-search")?.addEventListener("input", () => {
-    showTableSkeleton("ingredients-table-body", 7);
-    debouncedLoadIngredients();
+  document.getElementById("low-stock-filter")?.addEventListener("change", () => {
+    renderProductsView({ resetPage: true });
   });
-  document.getElementById("ingredient-low-stock-filter")?.addEventListener("change", loadIngredients);
+  document.getElementById("products-page-prev")?.addEventListener("click", () => {
+    if (state.productsPage <= 1) return;
+    state.productsPage -= 1;
+    renderProductsView();
+  });
+  document.getElementById("products-page-next")?.addEventListener("click", () => {
+    state.productsPage += 1;
+    renderProductsView();
+  });
+  document.getElementById("products-table-body")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-product-action]");
+    if (!btn) return;
+    const id = Number(btn.dataset.productId);
+    if (!id) return;
+    const action = btn.dataset.productAction;
+    if (action === "edit") openEditProduct(id);
+    else if (action === "sell") quickSell(id);
+    else if (action === "delete") {
+      const product = state.products.find((p) => p.id === id);
+      openDeleteProduct(id, product?.name || "this product");
+    }
+  });
+
+  const debouncedApplyIngredientsFilters = debounce(() => renderIngredientsView({ resetPage: true }), 150);
+  document.getElementById("ingredient-search")?.addEventListener("input", debouncedApplyIngredientsFilters);
+  document.getElementById("ingredient-low-stock-filter")?.addEventListener("change", () => {
+    renderIngredientsView({ resetPage: true });
+  });
+  document.getElementById("ingredients-page-prev")?.addEventListener("click", () => {
+    if (state.ingredientsPage <= 1) return;
+    state.ingredientsPage -= 1;
+    renderIngredientsView();
+  });
+  document.getElementById("ingredients-page-next")?.addEventListener("click", () => {
+    state.ingredientsPage += 1;
+    renderIngredientsView();
+  });
+  document.getElementById("ingredients-table-body")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-ingredient-action]");
+    if (!btn) return;
+    const id = Number(btn.dataset.ingredientId);
+    if (!id) return;
+    const action = btn.dataset.ingredientAction;
+    if (action === "edit") openEditIngredient(id);
+    else if (action === "delete") {
+      const ingredient = state.ingredients.find((ing) => ing.id === id);
+      openDeleteIngredient(id, ingredient?.name || "this ingredient");
+    }
+  });
   document.getElementById("product-name")?.addEventListener("input", () => {
     syncCategoryFromProductName();
     updateProductStockFields();
@@ -7283,9 +7499,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("btn-pos-mode")?.addEventListener("click", togglePosMode);
 
+  const debouncedRenderQuickPick = debounce(() => renderQuickPick(), 150);
   document.getElementById("sell-search")?.addEventListener("input", (e) => {
     state.sellSearch = e.target.value;
-    renderQuickPick();
+    debouncedRenderQuickPick();
   });
 
   document.getElementById("sell-product").addEventListener("change", updateSellPreview);

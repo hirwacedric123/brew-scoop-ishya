@@ -56,15 +56,37 @@
 }
 
 .data-table tbody tr {
-  transition: background var(--transition);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 58px;
 }
 
 .data-table tbody tr:nth-child(even) {
-  background: color-mix(in srgb, var(--foam) 45%, transparent);
+  background: var(--foam);
 }
 
 .data-table tbody tr:hover {
-  background: color-mix(in srgb, var(--cream) 35%, transparent);
+  background: var(--cream);
+}
+
+.table-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  margin-top: 0.85rem;
+  padding: 0 0.15rem;
+}
+
+.table-pagination[hidden] {
+  display: none;
+}
+
+.table-pagination-info {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  min-width: 7.5rem;
+  text-align: center;
 }
 
 .product-cell {
