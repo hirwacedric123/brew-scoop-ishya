@@ -189,6 +189,12 @@
     align-items: stretch;
   }
 
+  .toolbar-actions {
+    margin-left: 0;
+    justify-content: center;
+    width: 100%;
+  }
+
   .toolbar-count {
     margin-left: 0;
     text-align: center;

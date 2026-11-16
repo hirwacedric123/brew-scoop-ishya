@@ -255,6 +255,10 @@
             </div>
             <div class="dashboard-activity-meta">
               <button type="button" class="status-pill status-pill-btn" id="credit-outstanding-pill" data-view="credits" hidden></button>
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-export-dashboard-activity" title="Export CSV or Excel">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export
+              </button>
               <button type="button" class="btn btn-ghost btn-sm" id="btn-refresh-activity" title="Refresh">Refresh</button>
               <button type="button" class="btn btn-ghost btn-sm" data-view="credits">All credits</button>
             </div>
@@ -414,7 +418,13 @@
           <label class="checkbox-label">
             <input type="checkbox" id="low-stock-filter"> Low stock only
           </label>
-          <span class="toolbar-count" id="products-count"></span>
+          <div class="toolbar-actions">
+            <span class="toolbar-count" id="products-count"></span>
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-export-products" title="Export CSV or Excel">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Export
+            </button>
+          </div>
         </div>
 
         <div class="table-wrap table-premium table-virtual" id="products-table-wrap">
@@ -467,7 +477,13 @@
           <label class="checkbox-label">
             <input type="checkbox" id="ingredient-low-stock-filter"> Low stock only
           </label>
-          <span class="toolbar-count" id="ingredients-count"></span>
+          <div class="toolbar-actions">
+            <span class="toolbar-count" id="ingredients-count"></span>
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-export-ingredients" title="Export CSV or Excel">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Export
+            </button>
+          </div>
         </div>
 
         <div class="table-wrap table-premium table-virtual" id="ingredients-table-wrap">
@@ -1224,6 +1240,10 @@
                 <option value="ingredient">Ingredients</option>
                 <option value="cup">Cups</option>
               </select>
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-export-lots" title="Export CSV or Excel">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export
+              </button>
               <button type="button" class="btn btn-ghost btn-sm" id="lots-refresh-btn">Refresh</button>
             </div>
           </div>
@@ -1315,6 +1335,12 @@
           <select id="history-category-filter" aria-label="Filter by category">
             <option value="">All Categories</option>
           </select>
+          <div class="toolbar-actions">
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-export-history" title="Export CSV or Excel">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Export
+            </button>
+          </div>
         </div>
 
         <div class="table-wrap table-premium">
@@ -1412,6 +1438,12 @@
             <option value="momo">MoMo</option>
             <option value="visa">Visa</option>
           </select>
+          <div class="toolbar-actions">
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-export-credits" title="Export CSV or Excel">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Export
+            </button>
+          </div>
         </div>
 
         <div class="table-wrap table-premium">
@@ -1597,8 +1629,14 @@
 
             <div class="card">
               <div class="card-header">
-                <h3 id="sales-detail-title">Sales Detail</h3>
-                <span class="text-muted" id="sales-detail-subtitle"></span>
+                <div>
+                  <h3 id="sales-detail-title">Sales Detail</h3>
+                  <span class="text-muted" id="sales-detail-subtitle"></span>
+                </div>
+                <button type="button" class="btn btn-ghost btn-sm" id="btn-export-sales-detail" title="Export CSV or Excel">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Export
+                </button>
               </div>
               <div class="table-wrap" style="border:none;box-shadow:none;">
                 <table class="data-table">
@@ -1696,10 +1734,16 @@
         <div id="admin-panel-team" class="admin-panel active">
           <div class="admin-panel-header">
             <h3>Team Management</h3>
-            <button class="btn btn-primary" id="btn-add-user">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
-              Add User
-            </button>
+            <div class="attendance-filters">
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-export-users" title="Export CSV or Excel">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export
+              </button>
+              <button class="btn btn-primary" id="btn-add-user">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
+                Add User
+              </button>
+            </div>
           </div>
           <div class="table-wrap table-premium">
             <table class="data-table">
@@ -1724,10 +1768,16 @@
               <h3>Product Categories</h3>
               <p class="text-muted admin-panel-desc">Shared Cups products share one cup pool; Individuals track stock per product.</p>
             </div>
-            <button class="btn btn-primary" id="btn-add-category">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-              Add Category
-            </button>
+            <div class="attendance-filters">
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-export-categories" title="Export CSV or Excel">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export
+              </button>
+              <button class="btn btn-primary" id="btn-add-category">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+                Add Category
+              </button>
+            </div>
           </div>
           <div class="table-wrap table-premium">
             <table class="data-table">
@@ -1831,6 +1881,10 @@
               <select id="activity-user-filter" aria-label="Filter by user">
                 <option value="">All users</option>
               </select>
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-export-activity" title="Export CSV or Excel">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export
+              </button>
               <button type="button" class="btn btn-primary btn-sm" id="btn-activity-refresh">Refresh</button>
             </div>
           </div>
@@ -1862,10 +1916,16 @@
               <h3>Businesses</h3>
               <p class="text-muted admin-panel-desc">Create and manage separate business accounts.</p>
             </div>
-            <button class="btn btn-primary" id="btn-add-business">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-              Add Business
-            </button>
+            <div class="attendance-filters">
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-export-businesses" title="Export CSV or Excel">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export
+              </button>
+              <button class="btn btn-primary" id="btn-add-business">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+                Add Business
+              </button>
+            </div>
           </div>
           <div class="table-wrap table-premium">
             <table class="data-table">
@@ -1890,10 +1950,16 @@
                 Super admins keep access to every shop.
               </p>
             </div>
-            <button class="btn btn-primary" id="btn-add-platform-admin" type="button">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
-              Add Admin
-            </button>
+            <div class="attendance-filters">
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-export-platform-admins" title="Export CSV or Excel">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export
+              </button>
+              <button class="btn btn-primary" id="btn-add-platform-admin" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
+                Add Admin
+              </button>
+            </div>
           </div>
           <div class="table-wrap table-premium">
             <table class="data-table">
@@ -1925,6 +1991,10 @@
               <select id="attendance-user-filter" aria-label="Filter by user">
                 <option value="">All users</option>
               </select>
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-export-attendance" title="Export CSV or Excel">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export
+              </button>
               <button type="button" class="btn btn-primary btn-sm" id="btn-attendance-refresh">Refresh</button>
             </div>
           </div>

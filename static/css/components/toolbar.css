@@ -14,8 +14,15 @@
   box-shadow: var(--shadow-xs), var(--shadow);
 }
 
-.toolbar-count {
+.toolbar-actions {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.toolbar-count {
   font-size: 0.8rem;
   color: var(--text-muted);
   font-weight: 500;
@@ -97,4 +104,40 @@
 
 .search-box input::placeholder {
   color: var(--text-subtle);
+}
+
+.export-menu {
+  position: fixed;
+  z-index: 1200;
+  min-width: 10.5rem;
+  padding: 0.35rem;
+  background: white;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow), var(--shadow-xs);
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.export-menu-item {
+  appearance: none;
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 0.55rem 0.75rem;
+  border-radius: calc(var(--radius-sm) - 2px);
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.export-menu-item:hover,
+.export-menu-item:focus-visible {
+  background: var(--foam);
+  color: var(--coffee);
+  outline: none;
 }

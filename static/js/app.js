@@ -81,9 +81,12 @@ const state = {
   currentBusiness: window.CURRENT_BUSINESS || null,
   memberships: window.MEMBERSHIPS || [],
   businesses: [],
+  platformAdmins: [],
   sellerShift: null,
   charts: {},
   lots: [],
+  historyTransactions: [],
+  attendanceSessions: [],
 };
 
 // Pending cart-removal action awaiting admin-password confirmation.
@@ -4389,6 +4392,537 @@ function triggerBlobDownload(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
+// ── Data export (CSV / Excel, filtered/loaded rows) ─────────────────────────
+
+const XLSX_CDN = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
+let activeExportMenu = null;
+
+function csvEscapeCell(value) {
+  if (value == null) return "";
+  const str = String(value);
+  if (/[",\n\r]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
+  return str;
+}
+
+function rowsToCsv(headers, rows) {
+  const lines = [headers.map(csvEscapeCell).join(",")];
+  for (const row of rows) {
+    lines.push(row.map(csvEscapeCell).join(","));
+  }
+  return `\uFEFF${lines.join("\r\n")}`;
+}
+
+function xmlEscapeCell(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function rowsToExcelXml(headers, rows) {
+  const cellXml = (value) => {
+    const str = value == null ? "" : String(value);
+    const isNum = str !== "" && /^-?\d+(\.\d+)?$/.test(str);
+    return `<Cell><Data ss:Type="${isNum ? "Number" : "String"}">${xmlEscapeCell(str)}</Data></Cell>`;
+  };
+  const headerRow = `<Row>${headers.map(cellXml).join("")}</Row>`;
+  const body = rows.map((row) => `<Row>${row.map(cellXml).join("")}</Row>`).join("");
+  return `<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+ <Worksheet ss:Name="Export">
+  <Table>
+   ${headerRow}
+   ${body}
+  </Table>
+ </Worksheet>
+</Workbook>`;
+}
+
+function exportFilename(base, ext = "csv") {
+  const stamp = new Date()
+    .toISOString()
+    .slice(0, 16)
+    .replace(/[T:]/g, (ch) => (ch === "T" ? "-" : ""));
+  const safe = String(base || "export").replace(/[^\w.-]+/g, "_");
+  return `${safe}-${stamp}.${ext}`;
+}
+
+/** Spreadsheet-friendly datetime: "16 Nov 2026, 22:15" (no seconds). */
+function formatExportDateTime(iso) {
+  if (iso == null || iso === "") return "";
+  const raw = String(iso).trim();
+  if (!raw) return "";
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    const [y, m, d] = raw.split("-").map(Number);
+    const dt = new Date(y, m - 1, d);
+    if (Number.isNaN(dt.getTime())) return raw;
+    return dt.toLocaleDateString("en-GB", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    });
+  }
+
+  const normalized = raw.includes("T") ? raw : raw.replace(" ", "T");
+  const dt = new Date(normalized);
+  if (Number.isNaN(dt.getTime())) return raw;
+  return dt.toLocaleString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function exportPayloadOrToast({ filenameBase, headers, rows }) {
+  if (!rows.length) {
+    toast("Nothing to export", "error");
+    return null;
+  }
+  return { filenameBase, headers, rows };
+}
+
+function downloadCsv(filenameBase, headers, rows) {
+  const payload = exportPayloadOrToast({ filenameBase, headers, rows });
+  if (!payload) return false;
+  const csv = rowsToCsv(headers, rows);
+  triggerBlobDownload(
+    new Blob([csv], { type: "text/csv;charset=utf-8" }),
+    exportFilename(filenameBase, "csv")
+  );
+  toast(`Exported ${fmtNum.format(rows.length)} CSV row${rows.length === 1 ? "" : "s"}`, "success");
+  return true;
+}
+
+function downloadExcelFallback(filenameBase, headers, rows) {
+  const xml = rowsToExcelXml(headers, rows);
+  triggerBlobDownload(
+    new Blob([xml], { type: "application/vnd.ms-excel;charset=utf-8" }),
+    exportFilename(filenameBase, "xls")
+  );
+  toast(`Exported ${fmtNum.format(rows.length)} Excel row${rows.length === 1 ? "" : "s"}`, "success");
+  return true;
+}
+
+async function ensureXlsx() {
+  if (window.XLSX) return window.XLSX;
+  await loadScriptOnce(XLSX_CDN);
+  if (!window.XLSX) throw new Error("Excel library unavailable");
+  return window.XLSX;
+}
+
+async function downloadExcel(filenameBase, headers, rows) {
+  const payload = exportPayloadOrToast({ filenameBase, headers, rows });
+  if (!payload) return false;
+  try {
+    const XLSX = await ensureXlsx();
+    const sheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(book, sheet, "Export");
+    const buffer = XLSX.write(book, { bookType: "xlsx", type: "array" });
+    triggerBlobDownload(
+      new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      }),
+      exportFilename(filenameBase, "xlsx")
+    );
+    toast(`Exported ${fmtNum.format(rows.length)} Excel row${rows.length === 1 ? "" : "s"}`, "success");
+    return true;
+  } catch (err) {
+    console.warn("xlsx export failed, using Excel XML fallback", err);
+    return downloadExcelFallback(filenameBase, headers, rows);
+  }
+}
+
+async function runDataExport(format, getData) {
+  const data = typeof getData === "function" ? getData() : getData;
+  if (!data) return;
+  const { filenameBase, headers, rows } = data;
+  if (format === "xlsx" || format === "excel") {
+    await downloadExcel(filenameBase, headers, rows);
+  } else {
+    downloadCsv(filenameBase, headers, rows);
+  }
+}
+
+function closeExportMenu() {
+  if (!activeExportMenu) return;
+  activeExportMenu.remove();
+  activeExportMenu = null;
+}
+
+function openExportMenu(anchorBtn, getData) {
+  closeExportMenu();
+  const menu = document.createElement("div");
+  menu.className = "export-menu";
+  menu.setAttribute("role", "menu");
+  menu.innerHTML = `
+    <button type="button" class="export-menu-item" data-export-format="csv" role="menuitem">CSV (.csv)</button>
+    <button type="button" class="export-menu-item" data-export-format="xlsx" role="menuitem">Excel (.xlsx)</button>
+  `;
+
+  const rect = anchorBtn.getBoundingClientRect();
+  menu.style.position = "fixed";
+  menu.style.top = `${rect.bottom + 6}px`;
+  menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 180))}px`;
+
+  menu.addEventListener("click", (e) => {
+    const item = e.target.closest("[data-export-format]");
+    if (!item) return;
+    const format = item.dataset.exportFormat;
+    closeExportMenu();
+    runDataExport(format, getData).catch((err) => {
+      toast(err.message || "Export failed", "error");
+    });
+  });
+
+  document.body.appendChild(menu);
+  activeExportMenu = menu;
+
+  const onDocClick = (e) => {
+    if (e.target === anchorBtn || anchorBtn.contains(e.target)) return;
+    if (activeExportMenu?.contains(e.target)) return;
+    closeExportMenu();
+    document.removeEventListener("click", onDocClick, true);
+    document.removeEventListener("keydown", onKey);
+  };
+  const onKey = (e) => {
+    if (e.key === "Escape") {
+      closeExportMenu();
+      document.removeEventListener("click", onDocClick, true);
+      document.removeEventListener("keydown", onKey);
+    }
+  };
+  setTimeout(() => {
+    document.addEventListener("click", onDocClick, true);
+    document.addEventListener("keydown", onKey);
+  }, 0);
+}
+
+function activityDetailsPlain(log) {
+  const details =
+    log?.details && typeof log.details === "object" ? { ...log.details } : {};
+  const parts = [];
+  if (log?.entity_type && log?.entity_id != null && log.entity_id !== "") {
+    parts.push(`${log.entity_type}: ${log.entity_id}`);
+  }
+  Object.entries(details).forEach(([key, raw]) => {
+    if (ACTIVITY_SKIP_KEYS.has(key)) return;
+    if (raw == null || raw === "") return;
+    const label = ACTIVITY_DETAIL_LABELS[key] || key.replace(/_/g, " ");
+    const value = typeof raw === "object" ? JSON.stringify(raw) : String(raw);
+    parts.push(`${label}: ${value}`);
+  });
+  return parts.join("; ");
+}
+
+function getProductsExportData() {
+  const products = getFilteredProducts();
+  const showCost = canViewCost();
+  const headers = ["Product", "Category", "Sell price", "Stock", "Status"];
+  if (showCost) headers.splice(3, 0, "Cost", "Margin", "Margin %");
+  const rows = products.map((p) => {
+    const row = [
+      p.name || "",
+      p.category || "",
+      p.price ?? "",
+      p.quantity ?? "",
+      stockLabel(p).replace(/<[^>]+>/g, "") || p.stock_status || "",
+    ];
+    if (showCost) {
+      row.splice(3, 0, p.cost_price ?? "", p.margin ?? "", p.margin_pct ?? "");
+    }
+    return row;
+  });
+  return { filenameBase: "products", headers, rows };
+}
+
+function getIngredientsExportData() {
+  const items = getFilteredIngredients();
+  const showCost = canViewCost();
+  const headers = showCost
+    ? ["Ingredient", "Unit", "Stock", "Cost / unit", "Reorder", "Status"]
+    : ["Ingredient", "Unit", "Stock", "Reorder", "Status"];
+  const rows = items.map((ing) => {
+    const base = [ing.name || "", ing.unit || "", ing.quantity ?? ""];
+    if (showCost) base.push(ing.cost_per_unit ?? "");
+    base.push(ing.reorder_level ?? "", stockLabel(ing) || ing.stock_status || "");
+    return base;
+  });
+  return { filenameBase: "ingredients", headers, rows };
+}
+
+function getLotsExportData() {
+  const lots = state.lots || [];
+  const showCost = canViewCost();
+  const headers = showCost
+    ? ["Lot ID", "Item", "Pool", "Source", "Received", "Expiry", "Qty remaining", "Unit cost", "Value"]
+    : ["Lot ID", "Item", "Pool", "Source", "Received", "Expiry", "Qty remaining"];
+  const rows = lots.map((lot) => {
+    const row = [
+      lot.id ?? "",
+      lot.item_name || "",
+      lot.pool || "",
+      lot.source || "",
+      formatExportDateTime(lot.received_at),
+      formatExportDateTime(lot.expiry_date),
+      lot.qty_remaining ?? "",
+    ];
+    if (showCost) row.push(lot.unit_cost ?? "", lot.value ?? "");
+    return row;
+  });
+  return { filenameBase: "lots", headers, rows };
+}
+
+function getHistoryExportData() {
+  const transactions = state.historyTransactions || [];
+  const hideSeller = isSeller();
+  const headers = hideSeller
+    ? ["Date", "Product", "Category", "Type", "Qty", "Amount", "Table", "Payment", "Notes", "Ref", "Voided"]
+    : ["Date", "Product", "Category", "Type", "Qty", "Amount", "Table", "Payment", "Seller", "Notes", "Ref", "Voided"];
+  const rows = transactions.map((t) => {
+    const row = [
+      formatExportDateTime(t.created_at),
+      t.product_name || "",
+      t.category || "",
+      t.type || "",
+      t.quantity ?? "",
+      t.type === "sale" ? t.total_amount ?? "" : "",
+      t.type === "sale" ? t.table_name || "" : "",
+      t.type === "sale" ? paymentMethodLabel(t.payment_method) : "",
+    ];
+    if (!hideSeller) row.push(t.type === "sale" ? t.seller_name || "" : "");
+    row.push(t.notes || "", t.checkout_ref || "", t.is_voided ? "Yes" : "No");
+    return row;
+  });
+  return { filenameBase: "history", headers, rows };
+}
+
+function getCreditsExportData() {
+  const credits = state.creditsReport?.credits || [];
+  const headers = [
+    "Date",
+    "Ref",
+    "Customer / Notes",
+    "Table",
+    "Products",
+    "Seller",
+    "Status",
+    "Settled method",
+    "Settled at",
+    "Settled by",
+    "Amount",
+  ];
+  const rows = credits.map((sale) => {
+    const products = (sale.items || [])
+      .map((item) => `${item.product_name} x${item.quantity}`)
+      .join("; ");
+    return [
+      formatExportDateTime(sale.created_at),
+      sale.checkout_ref || "",
+      sale.notes || "",
+      sale.table_name || "",
+      products,
+      sale.seller_name || "",
+      saleStatusLabel(sale.status_label).text,
+      paymentMethodLabel(sale.settled_method),
+      formatExportDateTime(sale.settled_at),
+      sale.settled_by_name || "",
+      sale.total_amount ?? "",
+    ];
+  });
+  return { filenameBase: "credits", headers, rows };
+}
+
+function getSalesDetailExportData() {
+  const sales = state.salesDetailRows || [];
+  const hideSeller = isSeller();
+  const headers = hideSeller
+    ? ["Time", "Product", "Category", "Qty", "Amount", "Table", "Payment"]
+    : ["Time", "Product", "Category", "Qty", "Amount", "Table", "Payment", "Seller"];
+  const rows = sales.map((s) => {
+    const row = [
+      formatExportDateTime(s.created_at),
+      s.product_name || "",
+      s.category || "",
+      s.quantity ?? "",
+      s.total_amount ?? "",
+      s.table_name || "",
+      paymentMethodLabel(s.payment_method),
+    ];
+    if (!hideSeller) row.push(s.seller_name || "");
+    return row;
+  });
+  return { filenameBase: "sales-detail", headers, rows };
+}
+
+function getDashboardActivityExportData() {
+  const rowsData = state.dashboard?.sale_activity || [];
+  const headers = [
+    "Date",
+    "Table",
+    "Products",
+    "Seller",
+    "Payment",
+    "Status",
+    "Amount",
+    "Notes",
+    "Ref",
+  ];
+  const rows = rowsData.map((sale) => {
+    const products = (sale.items || [])
+      .map((item) => `${item.product_name} x${item.quantity}`)
+      .join("; ");
+    return [
+      formatExportDateTime(sale.created_at),
+      sale.table_name || "",
+      products,
+      sale.seller_name || "",
+      paymentMethodLabel(sale.payment_method),
+      saleStatusLabel(sale.status_label).text,
+      sale.total_amount ?? "",
+      sale.notes || "",
+      sale.checkout_ref || "",
+    ];
+  });
+  return { filenameBase: "dashboard-sales", headers, rows };
+}
+
+function getActivityLogsExportData() {
+  const logs = state.activityLogs || [];
+  const headers = ["When", "User", "Action", "Entity", "Details"];
+  const rows = logs.map((log) => [
+    formatExportDateTime(log.created_at),
+    log.user_name || "System",
+    log.action_label || log.action || "",
+    log.entity_type
+      ? `${String(log.entity_type).replace(/_/g, " ")}${
+          log.entity_id != null && log.entity_id !== "" ? ` #${log.entity_id}` : ""
+        }`
+      : "",
+    activityDetailsPlain(log),
+  ]);
+  return { filenameBase: "activity-log", headers, rows };
+}
+
+function getUsersExportData() {
+  const users = state.users || [];
+  const headers = ["Name", "Username", "Email", "Role", "Status"];
+  const rows = users.map((u) => [
+    u.display_name || "",
+    u.username || "",
+    u.email || "",
+    ROLE_LABELS[u.role] || u.role || "",
+    u.is_active ? "Active" : "Inactive",
+  ]);
+  return { filenameBase: "team", headers, rows };
+}
+
+function getCategoriesExportData() {
+  const categories = state.categories || [];
+  const headers = ["Name", "Products", "Stock type", "Default"];
+  const rows = categories.map((c) => [
+    c.name || "",
+    c.product_count ?? 0,
+    c.uses_cup_stock ? "Shared cups" : "Individual",
+    c.is_default ? "Yes" : "No",
+  ]);
+  return { filenameBase: "categories", headers, rows };
+}
+
+function getBusinessesExportData() {
+  const businesses = state.businesses || [];
+  const headers = ["Name", "Slug", "Members", "Status"];
+  const rows = businesses.map((b) => [
+    b.name || "",
+    b.slug || "",
+    b.member_count ?? 0,
+    b.is_active ? "Active" : "Inactive",
+  ]);
+  return { filenameBase: "businesses", headers, rows };
+}
+
+function getPlatformAdminsExportData() {
+  const admins = state.platformAdmins || [];
+  const headers = ["Name", "Username", "Type", "Business access"];
+  const rows = admins.map((u) => [
+    u.display_name || "",
+    u.username || "",
+    u.is_platform_admin ? "Super admin" : "Business admin",
+    u.is_platform_admin
+      ? "All businesses"
+      : (u.businesses || []).map((b) => b.name).join("; ") || "",
+  ]);
+  return { filenameBase: "business-admins", headers, rows };
+}
+
+function getAttendanceExportData() {
+  const sessions = state.attendanceSessions || [];
+  const headers = [
+    "Name",
+    "Username",
+    "Role",
+    "Logged in",
+    "Logged out",
+    "Last heartbeat",
+    "Duration",
+    "Status",
+  ];
+  const rows = sessions.map((s) => [
+    s.display_name || "",
+    s.username || "",
+    ROLE_LABELS[s.role] || s.role || "",
+    formatExportDateTime(s.logged_in_at),
+    formatExportDateTime(s.logged_out_at),
+    formatExportDateTime(s.last_heartbeat_at),
+    s.duration_label || "",
+    s.is_active
+      ? "Active"
+      : s.idle_before_logout
+        ? "Idle gap"
+        : s.logout_reason || "Ended",
+  ]);
+  return { filenameBase: "attendance", headers, rows };
+}
+
+function initDataExports() {
+  const bind = (id, getData) => {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    btn.setAttribute("aria-haspopup", "menu");
+    btn.title = btn.title?.replace(/ as CSV$/i, "") || "Export CSV or Excel";
+    if (!/csv|excel/i.test(btn.title)) btn.title = "Export CSV or Excel";
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        openExportMenu(btn, getData);
+      } catch (err) {
+        toast(err.message || "Export failed", "error");
+      }
+    });
+  };
+  bind("btn-export-products", getProductsExportData);
+  bind("btn-export-ingredients", getIngredientsExportData);
+  bind("btn-export-lots", getLotsExportData);
+  bind("btn-export-history", getHistoryExportData);
+  bind("btn-export-credits", getCreditsExportData);
+  bind("btn-export-sales-detail", getSalesDetailExportData);
+  bind("btn-export-dashboard-activity", getDashboardActivityExportData);
+  bind("btn-export-activity", getActivityLogsExportData);
+  bind("btn-export-users", getUsersExportData);
+  bind("btn-export-categories", getCategoriesExportData);
+  bind("btn-export-businesses", getBusinessesExportData);
+  bind("btn-export-platform-admins", getPlatformAdminsExportData);
+  bind("btn-export-attendance", getAttendanceExportData);
+}
+
 function loadScriptOnce(src) {
   return new Promise((resolve, reject) => {
     const existing = document.querySelector(`script[data-src="${src}"]`);
@@ -6636,6 +7170,7 @@ function renderHistory(transactions) {
   const tbody = document.getElementById("history-table-body");
   const hideSellerCol = isSeller();
   const colCount = hideSellerCol ? 9 : 10;
+  state.historyTransactions = Array.isArray(transactions) ? transactions : [];
 
   if (!transactions.length) {
     tbody.innerHTML = `<tr><td colspan="${colCount}">${emptyState(UI_ICONS.clock, "No transactions", hideSellerCol ? "Your sales will appear here." : "Sales, restocks, and adjustments will appear here.")}</td></tr>`;
@@ -7625,6 +8160,7 @@ async function loadAttendance() {
 function renderAttendanceTable(sessions) {
   const tbody = document.getElementById("attendance-table-body");
   if (!tbody) return;
+  state.attendanceSessions = Array.isArray(sessions) ? sessions : [];
 
   if (!sessions.length) {
     tbody.innerHTML = `<tr><td colspan="7">${emptyState(UI_ICONS.clock, "No sessions", "No login sessions in this period.", true)}</td></tr>`;
@@ -8311,6 +8847,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initPosShortcuts();
   initCashNoteInputs();
   initHeartbeat();
+  initDataExports();
 
   document.getElementById("btn-attendance-refresh")?.addEventListener("click", () => {
     loadAttendance().catch((e) => toast(e.message, "error"));
